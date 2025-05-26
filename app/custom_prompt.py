@@ -3,7 +3,7 @@ import tiktoken
 
 from prompt_templates import CONDENSE
 
-class UltraPrompt:
+class CustomPrompt:
     def __init__(self, text, openai, model):
         self.openai = openai
 
@@ -47,10 +47,10 @@ class UltraPrompt:
     def split(self):
         first_text, second_text = self.splitText()
 
-        first_half = UltraPrompt(first_text, self.openai, self.model)
+        first_half = CustomPrompt(first_text, self.openai, self.model)
         first_half.condense()
 
-        second_half = UltraPrompt(second_text, self.openai, self.model)
+        second_half = CustomPrompt(second_text, self.openai, self.model)
         second_half.condense()
 
         return first_half + '\n' + second_half

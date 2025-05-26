@@ -96,41 +96,29 @@ $(document).ready(function () {
     });
 
     async function initializeWorldBuilding(seedId, seedData) {
-        const steps = [
-            { action: 'create_main_character', text: 'Creating main character...' },
-            { action: 'create_main_character_skills', text: 'Creating main character skills...' },
-            { action: 'create_main_character_statuses', text: 'Creating main character statuses...' },
-            { action: 'create_locations', text: 'Creating locations...' },
-            { action: 'create_surrounding_characters', text: 'Creating surrounding characters...' },
-            { action: 'create_surrounding_character_skills', text: 'Creating surrounding characters skills...' },
-            { action: 'create_surrounding_character_statuses', text: 'Creating surrounding characters statuses...' },
-            { action: 'create_character_relationships', text: 'Creating character relationships...' },
-            { action: 'creating_events', text: 'Creating events...' },
-            { action: 'creating_items', text: 'Creating items...'}
-            // Add more steps as needed
-        ];
-
-        for (const step of steps) {
-            updateNarrativeList(step.text);
-            try {
-                await executeStep(step, seedId, seedData);
-                updateNarrativeList(`${step.text} Completed.`);
-            } catch (error) {
-                console.error(`Error during ${step.action}:`, error);
-                updateNarrativeList(`Error during ${step.text.toLowerCase()}`);
-                break;  // Stop execution if there is an error
-            }
+        updateNarrativeList("Starting world building process...");
+        try {
+            const response = await executeWorldBuilding(seedId, seedData);
+            // Here you have a single aggregated response (an object with keys for each step)
+            console.log("Aggregated world building results:", response);
+            updateNarrativeList("World building completed successfully!");
+        } catch (error) {
+            console.error("Error during world building:", error);
+            updateNarrativeList("An error occurred during world building.");
         }
-        updateNarrativeList('World building completed!');
     }
-
-    async function executeStep(step, seedId, seedData) {
+    
+    async function executeWorldBuilding(seedId, seedData) {
         return new Promise((resolve, reject) => {
             $.ajax({
-                url: `/initialize_world_building/${step.action}`,
+                url: '/initialize_world_building',
                 type: 'POST',
                 contentType: 'application/json',
-                data: JSON.stringify({ seed_id: seedId, seed_data: seedData, openai_api_key: openaiApiKey }),
+                data: JSON.stringify({ 
+                    seed_id: seedId, 
+                    seed_data: seedData, 
+                    openai_api_key: openaiApiKey 
+                }),
                 success: function (response) {
                     resolve(response);
                 },
@@ -140,7 +128,7 @@ $(document).ready(function () {
             });
         });
     }
-
+    
     function updateNarrativeList(text) {
         if (narrativeTemplate) {
             const context = { text: text };
@@ -149,5 +137,5 @@ $(document).ready(function () {
         } else {
             console.error('Narrative item template not loaded');
         }
-    }
+    }      
 });

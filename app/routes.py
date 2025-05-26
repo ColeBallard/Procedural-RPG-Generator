@@ -4,8 +4,8 @@ import requests
 from flask import Blueprint, jsonify, render_template, current_app, request, send_from_directory
 from sqlalchemy.exc import IntegrityError
 
-from .orm import Seed, Character
-from .world_building import WorldBuilding
+from app.orm import Seed
+from app.world_building.world_building import WorldBuilder
 
 main = Blueprint('main', __name__)
 world_builder = None
@@ -45,96 +45,32 @@ def create_seed():
         finally:
             session.close()
 
-@main.route('/initialize_world_building/create_main_character', methods=['POST'])
-def create_main_character():
+@main.route('/initialize_world_building', methods=['POST'])
+def initialize_world_building():
     data = request.json
     seed_id = data.get('seed_id')
     seed_data = data.get('seed_data')
     openai_api_key = data.get('openai_api_key')
-
+    
+    # Set the OpenAI API key for this request
     current_app.openai.api_key = openai_api_key
 
     Session = current_app.config['SESSION_FACTORY']
     session = Session()
 
-    current_app.world_builder = WorldBuilding(seed_data, seed_id, session, current_app.openai, current_app.config['min_gpt'])
-    current_app.world_builder.create_main_character()
-
-    session.close()
-
-    # Add logic for creating the main character
-    return jsonify({"message": "Main character created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/create_main_character_skills', methods=['POST'])
-def create_main_character_skills():
-    Session = current_app.config['SESSION_FACTORY']
-    session = Session()
-
-    current_app.world_builder.create_main_character_skills()
-
-    session.close()
-
-    # Add logic for creating the main character
-    return jsonify({"message": "Main character skills created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/create_main_character_statuses', methods=['POST'])
-def create_main_character_statuses():
-    Session = current_app.config['SESSION_FACTORY']
-    session = Session()
-
-    current_app.world_builder.create_main_character_statuses()
-
-    session.close()
-
-    # Add logic for creating the main character
-    return jsonify({"message": "Main character statuses created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/create_locations', methods=['POST'])
-def create_locations():
-    Session = current_app.config['SESSION_FACTORY']
-    session = Session()
-
-    current_app.world_builder.create_locations()
-
-    session.close()
-
-    # Add logic for creating locations
-    return jsonify({"message": "Locations created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/create_surrounding_characters', methods=['POST'])
-def create_surrounding_characters():
-    data = request.json
-    seed_id = data.get('seed_id')
-    # Add logic for creating surrounding characters
-    return jsonify({"message": "Surrounding characters created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/create_surrounding_characters_skills', methods=['POST'])
-def create_surrounding_characters_skills():
-    data = request.json
-    seed_id = data.get('seed_id')
-    # Add logic for creating surrounding characters
-    return jsonify({"message": "Surrounding characters skills created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/create_surrounding_characters_statuses', methods=['POST'])
-def create_surrounding_characters_statuses():
-    data = request.json
-    seed_id = data.get('seed_id')
-    # Add logic for creating surrounding characters
-    return jsonify({"message": "Surrounding characters statuses created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/creating_events', methods=['POST'])
-def create_events():
-    data = request.json
-    seed_id = data.get('seed_id')
-    # Add logic for creating surrounding characters
-    return jsonify({"message": "Events created successfully", "status": "success"}), 200
-
-@main.route('/initialize_world_building/creating_items', methods=['POST'])
-def create_items():
-    data = request.json
-    seed_id = data.get('seed_id')
-    # Add logic for creating surrounding characters
-    return jsonify({"message": "Items created successfully", "status": "success"}), 200
+    try:
+        world_builder = WorldBuilder(seed_data, seed_id, session, current_app.openai, current_app.config['min_gpt'])
+        
+        # Orchestrate the world-building process by calling the build_world method
+        results = world_builder.build_world()
+        
+        # Optionally, you can check for errors or partial failures in 'results'
+        return jsonify(results), 200
+    except Exception as e:
+        session.rollback()
+        return jsonify({"message": "An error occurred during world building", "error": str(e)}), 500
+    finally:
+        session.close()
 
 @main.route('/api/settings', methods=['GET'])
 def get_settings():

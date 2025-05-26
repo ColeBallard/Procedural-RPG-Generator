@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 import openai
 
 from .orm import Base
-from .world_building import WorldBuilding
+from .world_building.world_building import WorldBuilder
 
 def createApp():
     app = Flask(__name__, static_folder='static', static_url_path='/static', template_folder='templates')
