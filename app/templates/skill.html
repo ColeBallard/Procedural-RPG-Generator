@@ -1,0 +1,15 @@
+<script id="skill" type="text/x-handlebars-template">
+    <div class="accordion-item">
+        <h2 class="accordion-header" id="headingSkill{{id}}">
+            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                    data-bs-target="#flush-collapseSkill{{id}}" aria-expanded="false" aria-controls="flush-collapseSkill{{id}}">
+                {{name}}
+            </button>
+        </h2>
+        <div id="flush-collapseSkill{{id}}" class="accordion-collapse collapse" aria-labelledby="headingSkill{{id}}">
+            <div class="accordion-body">
+                {{description}}
+            </div>
+        </div>
+    </div>
+</script>

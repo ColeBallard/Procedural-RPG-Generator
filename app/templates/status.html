@@ -1,0 +1,15 @@
+<script id="status" type="text/x-handlebars-template">
+    <div class="accordion-item">
+        <h2 class="accordion-header" id="headingStatus{{id}}">
+            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                    data-bs-target="#flush-collapseStatus{{id}}" aria-expanded="false" aria-controls="flush-collapseStatus{{id}}">
+                {{name}}
+            </button>
+        </h2>
+        <div id="flush-collapseStatus{{id}}" class="accordion-collapse collapse" aria-labelledby="headingStatus{{id}}">
+            <div class="accordion-body">
+                {{description}}
+            </div>
+        </div>
+    </div>
+</script>

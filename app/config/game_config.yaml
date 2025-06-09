@@ -1,0 +1,86 @@
+---
+min_gpt: "gpt-4o-mini"
+max_gpt: "gpt-4o"
+
+emotional_attributes:
+  attraction:
+    - Repulsed
+    - Disinclined
+    - Uninterested
+    - Indifferent
+    - Noticed
+    - Curious
+    - Intrigued
+    - Attracted
+    - Infatuated
+    - Enamored
+  respect:
+    - Contemptuous
+    - Disrespectful
+    - Critical
+    - Skeptical
+    - Neutral
+    - Acknowledging
+    - Respectful
+    - Admiring
+    - Reverential
+    - Venerating
+  trust:
+    - Distrustful
+    - Suspicious
+    - Wary
+    - Cautious
+    - Tentative
+    - Trusting
+    - Confident
+    - Assured
+    - Reliant
+    - Implicit
+  familiarity:
+    - Unknown
+    - Acquainted
+    - Recognized
+    - Familiar
+    - Well-known
+    - Studied
+    - Understood
+    - Intimate
+    - Close
+    - Inseparable
+  anger:
+    - Calm
+    - Slightly annoyed
+    - Annoyed
+    - Irritated
+    - Agitated
+    - Angry
+    - Very angry
+    - Furious
+    - Enraged
+    - Fuming
+  fear:
+    - Comfortable
+    - Slightly uneasy
+    - Uneasy
+    - Nervous
+    - Anxious
+    - Worried
+    - Scared
+    - Terrified
+    - Horrified
+    - Petrified
+
+classes:
+  - Warrior
+  - Mage
+  - Rogue
+  - Healer
+  - Paladin
+  - Ranger
+  - Sorcerer
+  - Bard
+  - Druid
+  - Monk
+  - Necromancer
+  - Barbarian
+  - Assassin

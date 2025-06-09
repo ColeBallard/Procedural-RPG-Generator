@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Procedural Game Narrative Generation</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"
+        integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.8/dist/umd/popper.min.js"
+        integrity="sha384-I7E8VVD/ismYTF4hNIPjVp/Zjvgyol6VFvRkX/vR+Vc4jQkC+hVqc2pM8ODewa9r"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.min.js"
+        integrity="sha384-0pUGZvbkm6XF6gxjEnlmuGrJXVbNuzT9qBBavbLwCsOGabYfZo0T0to5eqruptLy"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/handlebars@latest/dist/handlebars.js"></script>
+    <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
+</head>
+
+<body>
+    <div class="container-fluid">
+        <div class="row align-items-center">
+            <div class="col">
+                <h1>Procedural Game Narrative Generation</h1>
+            </div>
+            <div class="col-auto">
+                <div class="btn-group" role="group" aria-label="Basic example">
+                    <button class="btn btn-primary" id="game-view-btn">Game</button>
+                    <button class="btn btn-secondary" id="options-view-btn">Options</button>
+                </div>
+            </div>
+        </div>
+        <div class="container-fluid" id="game-view">
+            <div class="row">
+                <div class="col-md-3 border border-white rounded scrollable-section">
+                    <h3 class="title">Info</h3>
+                    <div class="accordion accordion-flush" id="infoAccordion">
+                        <!-- Locations Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingLocations">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseLocations" aria-expanded="false"
+                                    aria-controls="flush-collapseLocations">
+                                    Locations
+                                </button>
+                            </h2>
+                            <div id="flush-collapseLocations" class="accordion-collapse collapse"
+                                aria-labelledby="headingLocations">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added location accordions -->
+                                    <div class="accordion accordion-flush" id="locationsAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Events Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingEvents">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseEvents" aria-expanded="false"
+                                    aria-controls="flush-collapseEvents">
+                                    Events
+                                </button>
+                            </h2>
+                            <div id="flush-collapseEvents" class="accordion-collapse collapse"
+                                aria-labelledby="headingEvents">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added event accordions -->
+                                    <div class="accordion accordion-flush" id="eventsAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Interacting Characters Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingCharacters">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseCharacters" aria-expanded="false"
+                                    aria-controls="flush-collapseCharacters">
+                                    Interacting Characters
+                                </button>
+                            </h2>
+                            <div id="flush-collapseCharacters" class="accordion-collapse collapse"
+                                aria-labelledby="headingCharacters">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added character accordions -->
+                                    <div class="accordion accordion-flush" id="charactersAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Middle Column: Main Game Area -->
+                <div class="col-md-5 scrollable-section">
+                    <div id="game-output">
+                        <!-- Narrative content goes here -->
+                        <ul class="nav flex-column" id="narrativeList"></ul>
+                    </div>
+                    <div id="user-options">
+                        <!-- Pre-determined options -->
+                        <ul class="nav flex-column" id="optionsList"></ul>
+                        <textarea id="game-input" name="game-input" class="form-control"
+                            placeholder="Or go your own way..."></textarea>
+                        <button type="button" class="btn btn-primary" id="submit-game-input-btn">Submit</button>
+                    </div>
+                    <div class="error" id="game-error"></div>
+
+                    <!-- Optional Battle UI -->
+                    <div id="battle-ui" class="hidden"></div>
+                </div>
+
+                <!-- Right Column: Player Stats and Inventory -->
+                <div class="col-md-4 border border-white rounded scrollable-section">
+                    <h3 class="title">Character</h3>
+                    <div class="accordion accordion-flush" id="characterAccordion">
+                        <!-- Quests Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingQuests">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseQuests" aria-expanded="false"
+                                    aria-controls="flush-collapseQuests">
+                                    Quests
+                                </button>
+                            </h2>
+                            <div id="flush-collapseQuests" class="accordion-collapse collapse"
+                                aria-labelledby="headingQuests">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added quest accordions -->
+                                    <div class="accordion accordion-flush" id="questsAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Items Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingItems">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseItems" aria-expanded="false"
+                                    aria-controls="flush-collapseItems">
+                                    Items
+                                </button>
+                            </h2>
+                            <div id="flush-collapseItems" class="accordion-collapse collapse"
+                                aria-labelledby="headingItems">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added item accordions -->
+                                    <div class="accordion accordion-flush" id="itemsAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Skills Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingSkills">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseSkills" aria-expanded="false"
+                                    aria-controls="flush-collapseSkills">
+                                    Skills
+                                </button>
+                            </h2>
+                            <div id="flush-collapseSkills" class="accordion-collapse collapse"
+                                aria-labelledby="headingSkills">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added skill accordions -->
+                                    <div class="accordion accordion-flush" id="skillsAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Statuses Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingStatuses">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseStatuses" aria-expanded="false"
+                                    aria-controls="flush-collapseStatuses">
+                                    Statuses
+                                </button>
+                            </h2>
+                            <div id="flush-collapseStatuses" class="accordion-collapse collapse"
+                                aria-labelledby="headingStatuses">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added status accordions -->
+                                    <div class="accordion accordion-flush" id="statusesAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Relationships Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingRelationships">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseRelationships" aria-expanded="false"
+                                    aria-controls="flush-collapseRelationships">
+                                    Relationships
+                                </button>
+                            </h2>
+                            <div id="flush-collapseRelationships" class="accordion-collapse collapse"
+                                aria-labelledby="headingRelationships">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added relationship accordions -->
+                                    <div class="accordion accordion-flush" id="relationshipsAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Stats Dropdown -->
+                        <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingStats">
+                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                    data-bs-target="#flush-collapseStats" aria-expanded="false"
+                                    aria-controls="flush-collapseStats">
+                                    Stats
+                                </button>
+                            </h2>
+                            <div id="flush-collapseStats" class="accordion-collapse collapse"
+                                aria-labelledby="headingStats">
+                                <div class="accordion-body">
+                                    <!-- Placeholder for dynamically added stat accordions -->
+                                    <div class="accordion accordion-flush" id="statsAccordion"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="options-view">
+            <ul class="nav nav-tabs">
+                <li class="nav-item">
+                    <a class="nav-link" href="" id="new-game-tab">New Game</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="" id="load-game-tab">Load Game</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="" id="story-settings-tab">Story Settings</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="" id="api-keys-tab">API Keys</a>
+                </li>
+            </ul>
+            <div class="form-group" id="new-game-view">
+                <div class="input">
+                    <span class="input-label">Character Name: </span>
+                    <input type="text" class="form-control" id="new-game-character-name-input"
+                        name="new-game-character-name-input" placeholder="Optional">
+                </div>
+                <div class="input">
+                    <span class="input-label">Age: </span>
+                    <input type="number" class="form-control" id="new-game-character-age-input"
+                        name="new-game-character-age-input" placeholder="Optional">
+                </div>
+                <div class="input">
+                    <span class="input-label">Gender: </span>
+                    <select class="form-control" id="new-game-character-gender-input"
+                        name="new-game-character-gender-input">
+                        <option value="">Optional</option>
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                    </select>
+                </div>
+                <div class="input">
+                    <span class="input-label">Class: </span>
+                    <select class="form-control" id="new-game-character-class-input"
+                        name="new-game-character-class-input">
+                        <option value="">Optional</option>
+                        <!-- Options will be populated dynamically -->
+                    </select>
+                </div>
+                <div class="input">
+                    <span class="input-label">Story Inspiration: </span>
+                    <textarea class="form-control" id="new-game-inspiration-input" name="new-game-inspiration-input"
+                        placeholder="Optional" rows="3"></textarea>
+                </div>
+                <button type="button" class="submit-button" id="create-seed-btn">Create Seed</button>
+            </div>
+
+            <div id="load-game-view">
+
+            </div>
+            <div id="story-settings-view">
+
+            </div>
+            <div id="api-keys-view">
+                <div class="form-group row input"><span class="col-sm-2 col-form-label input-label">OpenAI API
+                        Key:
+                    </span><input class="col-sm-10" type="password" id="openai-api-key-input"
+                        name="openai-api-key-input" placeholder="Required"></div>
+                <div class="form-group row input"><span class="col-sm-2 col-form-label input-label">Groq API
+                        Key:
+                    </span><input class="col-sm-10" type="password" id="groq-api-key-input" name="groq-api-key-input"
+                        placeholder="Required"></div>
+                <button type="button" class="other-button" id="save-api-keys-btn">Save to Local Storage</button>
+                <div id="api-keys-note"><b>Note:</b> This feature is optional and will use your browsers data
+                    storage
+                    system
+                    to remember your API Keys. We <b>DO NOT</b> store or save your keys anywhere besides your
+                    own
+                    browser. This
+                    application uses these text boxes to make API calls. Both API keys are needed for this
+                    application
+                    to work.
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+
+</html>
