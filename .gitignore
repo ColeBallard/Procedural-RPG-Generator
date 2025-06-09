@@ -1,0 +1,34 @@
+__pycache__/
+
+.env
+
+docs/
+
+venv/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenvs & secrets
+venv/
+.env/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Replit/Nix
+.replit.nix
+replit.nix
+.nix/
+.nix-profile/
+.nix-channels/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

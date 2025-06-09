@@ -1,0 +1,11 @@
+run = "python app.py"
+modules = ["python-3.12"]
+[nix]
+channel = "stable-22_11"
+packages = ["cacert", "cargo", "gdb", "gitFull", "glibcLocales", "gmp", "libiconv", "libxcrypt", "pkg-config", "rustc", "xcodebuild", "xsimd", "zeromq", "zlib"]
+[deployment]
+run = ["sh", "-c", "python app.py"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
