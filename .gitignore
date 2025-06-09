@@ -32,3 +32,5 @@ replit.nix
 Thumbs.db
 .vscode/
 .idea/
+
+venv/
