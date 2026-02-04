@@ -1,20 +1,20 @@
 <script id="battle" type="text/x-handlebars-template">
-    <h3>Battle UI</h3>
+    <h3>⚔️ Battle Arena</h3>
     <div class="battle-info">
-        <p><strong>Player:</strong> {{player.name}}</p>
-        <p><strong>Health:</strong> {{player.health}}</p>
-        <p><strong>Mana:</strong> {{player.mana}}</p>
+        <p><strong>🛡️ Player:</strong> {{player.name}}</p>
+        <p><strong>❤️ Health:</strong> <span class="badge badge-success">{{player.health}}</span></p>
+        <p><strong>✨ Mana:</strong> <span class="badge badge-primary">{{player.mana}}</span></p>
     </div>
     <div class="enemy-info">
-        <p><strong>Enemy:</strong> {{enemy.name}}</p>
-        <p><strong>Health:</strong> {{enemy.health}}</p>
+        <p><strong>👹 Enemy:</strong> {{enemy.name}}</p>
+        <p><strong>❤️ Health:</strong> <span class="badge badge-danger">{{enemy.health}}</span></p>
     </div>
     <div class="battle-actions">
-        <button type="button" class="btn btn-danger">Attack</button>
-        <button type="button" class="btn btn-info">Defend</button>
+        <button type="button" class="btn btn-danger">⚔️ Attack</button>
+        <button type="button" class="btn btn-info">🛡️ Defend</button>
         <div class="dropdown d-inline">
             <button class="btn btn-success dropdown-toggle" type="button" id="dropdownMenuButton" data-bs-toggle="dropdown" aria-expanded="false">
-                Use Item
+                🎒 Use Item
             </button>
             <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton">
                 {{#each items}}
@@ -22,6 +22,6 @@
                 {{/each}}
             </ul>
         </div>
-        <button type="button" class="btn btn-warning">Run</button>
+        <button type="button" class="btn btn-warning">🏃 Run</button>
     </div>
 </script>

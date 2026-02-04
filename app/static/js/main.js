@@ -3,7 +3,181 @@ import { setLocalStorageItem, getLocalStorageItem } from './utils/storage.js';
 
 let narrativeTemplate;
 
+// Helper functions for authentication
+function showLandingPage() {
+    $('#landing-page').show();
+    $('#app-header').hide();
+    $('#main-menu').hide();
+    $('#game-view').hide();
+    $('#options-view').hide();
+}
+
+function showApp() {
+    $('#landing-page').hide();
+    $('#app-header').show();
+    showMainMenu();
+}
+
+// Helper functions for view management
+function showMainMenu() {
+    $('#main-menu').show();
+    $('#game-view').hide();
+    $('#options-view').hide();
+    $('#back-to-menu-btn').hide();
+}
+
+function showView(viewName) {
+    $('#main-menu').hide();
+    $('#game-view').hide();
+    $('#options-view').show();
+    $('#back-to-menu-btn').show();
+
+    // Hide all sub-views
+    $('#new-game-view').hide();
+    $('#load-game-view').hide();
+    $('#api-keys-view').hide();
+    $('#story-settings-view').hide();
+
+    // Show the requested view
+    $(`#${viewName}-view`).show();
+}
+
+function showGameView() {
+    $('#main-menu').hide();
+    $('#options-view').hide();
+    $('#game-view').show();
+    $('#back-to-menu-btn').show();
+}
+
 $(document).ready(function () {
+    // Check authentication status
+    $.ajax({
+        url: '/auth/check',
+        type: 'GET',
+        success: function(response) {
+            if (response.authenticated) {
+                // User is logged in
+                $('#user-welcome').text(`Welcome, ${response.username}!`);
+                showApp();
+            } else {
+                // User is not logged in
+                showLandingPage();
+            }
+        },
+        error: function() {
+            // On error, show landing page
+            showLandingPage();
+        }
+    });
+
+    // Authentication handlers
+    $('#show-signup').click(function(e) {
+        e.preventDefault();
+        $('#signin-form').hide();
+        $('#signup-form').show();
+        $('#signin-error').text('');
+    });
+
+    $('#show-signin').click(function(e) {
+        e.preventDefault();
+        $('#signup-form').hide();
+        $('#signin-form').show();
+        $('#signup-error').text('');
+    });
+
+    $('#signin-btn').click(function(e) {
+        e.preventDefault();
+        const username = $('#signin-username').val();
+        const password = $('#signin-password').val();
+
+        if (!username || !password) {
+            $('#signin-error').text('Please enter both username and password');
+            return;
+        }
+
+        $.ajax({
+            url: '/auth/login',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ username, password }),
+            success: function(response) {
+                if (response.success) {
+                    $('#user-welcome').text(`Welcome, ${response.username}!`);
+                    showApp();
+                } else {
+                    $('#signin-error').text(response.message);
+                }
+            },
+            error: function(xhr) {
+                const response = xhr.responseJSON;
+                $('#signin-error').text(response?.message || 'Login failed');
+            }
+        });
+    });
+
+    $('#signup-btn').click(function(e) {
+        e.preventDefault();
+        const username = $('#signup-username').val();
+        const email = $('#signup-email').val();
+        const password = $('#signup-password').val();
+
+        if (!username || !email || !password) {
+            $('#signup-error').text('Please fill in all fields');
+            return;
+        }
+
+        $.ajax({
+            url: '/auth/signup',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ username, email, password }),
+            success: function(response) {
+                if (response.success) {
+                    $('#user-welcome').text(`Welcome, ${response.username}!`);
+                    showApp();
+                } else {
+                    $('#signup-error').text(response.message);
+                }
+            },
+            error: function(xhr) {
+                const response = xhr.responseJSON;
+                $('#signup-error').text(response?.message || 'Signup failed');
+            }
+        });
+    });
+
+    $('#logout-btn').click(function(e) {
+        e.preventDefault();
+        $.ajax({
+            url: '/auth/logout',
+            type: 'POST',
+            success: function() {
+                showLandingPage();
+                // Clear forms
+                $('#signin-username').val('');
+                $('#signin-password').val('');
+                $('#signup-username').val('');
+                $('#signup-email').val('');
+                $('#signup-password').val('');
+                $('#signin-error').text('');
+                $('#signup-error').text('');
+            }
+        });
+    });
+
+    // Allow Enter key to submit forms
+    $('#signin-password').keypress(function(e) {
+        if (e.which === 13) {
+            $('#signin-btn').click();
+        }
+    });
+
+    $('#signup-password').keypress(function(e) {
+        if (e.which === 13) {
+            $('#signup-btn').click();
+        }
+    });
+
     // Loading API keys from local storage
     const openaiApiKey = getLocalStorageItem('key15-62689134');
     const groqApiKey = getLocalStorageItem('key73-41976154');
@@ -16,24 +190,32 @@ $(document).ready(function () {
         $("#groq-api-key-input").val(groqApiKey);
     }
 
-    $('#game-view').hide();
-    $('#options-view').show();
-
-    changeTabViews('api-keys', ['new-game', 'game-view', 'story-settings']);
-
-    $('#options-view-btn').click(function (e) {
+    // Main menu button handlers
+    $('#menu-new-game-btn').click(function (e) {
         e.preventDefault();
-        $('#game-view').hide();
-        $('#options-view').show();
+        showView('new-game');
     });
 
-    $('#game-view-btn').click(function (e) {
+    $('#menu-load-game-btn').click(function (e) {
         e.preventDefault();
-        $('#game-view').show();
-        $('#options-view').hide();
+        showView('load-game');
     });
 
-    setTabClickEvents(['new-game', 'load-game', 'story-settings', 'api-keys']);
+    $('#menu-api-keys-btn').click(function (e) {
+        e.preventDefault();
+        showView('api-keys');
+    });
+
+    $('#menu-story-settings-btn').click(function (e) {
+        e.preventDefault();
+        showView('story-settings');
+    });
+
+    // Back to menu button
+    $('#back-to-menu-btn').click(function (e) {
+        e.preventDefault();
+        showMainMenu();
+    });
 
     $('#save-api-keys-btn').click(function (e) {
         e.preventDefault();
@@ -83,8 +265,7 @@ $(document).ready(function () {
                 setLocalStorageItem('current-seed-id', response.seed_id);
 
                 // Switch to game view
-                $('#game-view').show();
-                $('#options-view').hide();
+                showGameView();
 
                 // Initialize world building
                 initializeWorldBuilding(response.seed_id, JSON.stringify(seedData));

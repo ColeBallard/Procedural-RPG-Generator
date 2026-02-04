@@ -1,10 +1,11 @@
 import datetime
 import requests
+from werkzeug.security import generate_password_hash, check_password_hash
 
-from flask import Blueprint, jsonify, render_template, current_app, request, send_from_directory
+from flask import Blueprint, jsonify, render_template, current_app, request, send_from_directory, session
 from sqlalchemy.exc import IntegrityError
 
-from app.orm import Seed
+from app.orm import Seed, User
 from app.world_building.world_building import WorldBuilder
 
 main = Blueprint('main', __name__)
@@ -102,6 +103,84 @@ def test_openai_key():
         return jsonify({'valid': True, 'message': 'API key is valid.'})
     else:
         return jsonify({'valid': False, 'message': 'API key is not valid.', 'error': response.json()}), 400
+
+@main.route('/auth/signup', methods=['POST'])
+def signup():
+    data = request.json
+    username = data.get('username')
+    email = data.get('email')
+    password = data.get('password')
+
+    if not username or not email or not password:
+        return jsonify({'success': False, 'message': 'All fields are required'}), 400
+
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+
+    try:
+        # Check if user already exists
+        existing_user = db_session.query(User).filter(
+            (User.username == username) | (User.email == email)
+        ).first()
+
+        if existing_user:
+            return jsonify({'success': False, 'message': 'Username or email already exists'}), 400
+
+        # Create new user
+        password_hash = generate_password_hash(password)
+        new_user = User(username=username, email=email, password_hash=password_hash)
+        db_session.add(new_user)
+        db_session.commit()
+
+        # Set session
+        session['user_id'] = new_user.id
+        session['username'] = new_user.username
+
+        return jsonify({'success': True, 'message': 'Account created successfully', 'username': username}), 201
+    except Exception as e:
+        db_session.rollback()
+        return jsonify({'success': False, 'message': f'Error creating account: {str(e)}'}), 500
+    finally:
+        db_session.close()
+
+@main.route('/auth/login', methods=['POST'])
+def login():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'success': False, 'message': 'Username and password are required'}), 400
+
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+
+    try:
+        user = db_session.query(User).filter(User.username == username).first()
+
+        if not user or not check_password_hash(user.password_hash, password):
+            return jsonify({'success': False, 'message': 'Invalid username or password'}), 401
+
+        # Set session
+        session['user_id'] = user.id
+        session['username'] = user.username
+
+        return jsonify({'success': True, 'message': 'Login successful', 'username': username}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error logging in: {str(e)}'}), 500
+    finally:
+        db_session.close()
+
+@main.route('/auth/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({'success': True, 'message': 'Logged out successfully'}), 200
+
+@main.route('/auth/check', methods=['GET'])
+def check_auth():
+    if 'user_id' in session:
+        return jsonify({'authenticated': True, 'username': session.get('username')}), 200
+    return jsonify({'authenticated': False}), 200
 
 def make_serializable(config):
     serializable_config = {}

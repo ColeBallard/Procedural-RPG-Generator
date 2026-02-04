@@ -18,6 +18,9 @@ def createApp():
     # Load environment variables
     load_dotenv()
 
+    # Configure session
+    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+
     # Load YAML configuration
     config_path = os.path.join(app.root_path, 'config', 'game_config.yaml')
     with open(config_path, 'r') as config_file:

@@ -7,33 +7,122 @@
 
     <title>Procedural Game Narrative Generation</title>
 
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
         integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+
+    <!-- Custom CSS -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
 
+    <!-- jQuery -->
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"
         integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
 
+    <!-- Bootstrap JS -->
     <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.8/dist/umd/popper.min.js"
         integrity="sha384-I7E8VVD/ismYTF4hNIPjVp/Zjvgyol6VFvRkX/vR+Vc4jQkC+hVqc2pM8ODewa9r"
         crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.min.js"
         integrity="sha384-0pUGZvbkm6XF6gxjEnlmuGrJXVbNuzT9qBBavbLwCsOGabYfZo0T0to5eqruptLy"
         crossorigin="anonymous"></script>
+
+    <!-- Handlebars -->
     <script src="https://cdn.jsdelivr.net/npm/handlebars@latest/dist/handlebars.js"></script>
+
+    <!-- Custom JS -->
     <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
 </head>
 
 <body>
     <div class="container-fluid">
-        <div class="row align-items-center">
+        <!-- Landing Page (Authentication) -->
+        <div id="landing-page" class="landing-page-container">
+            <div class="landing-content">
+                <div class="landing-header">
+                    <h1 class="landing-title">🎮 Procedural RPG Generator</h1>
+                    <p class="landing-subtitle">Create your own epic adventure with AI-powered narrative generation</p>
+                </div>
+
+                <!-- Sign In Form -->
+                <div id="signin-form" class="auth-form">
+                    <h2 class="auth-title">Sign In</h2>
+                    <div class="form-group">
+                        <label for="signin-username">Username</label>
+                        <input type="text" class="form-control" id="signin-username" placeholder="Enter your username">
+                    </div>
+                    <div class="form-group">
+                        <label for="signin-password">Password</label>
+                        <input type="password" class="form-control" id="signin-password" placeholder="Enter your password">
+                    </div>
+                    <div id="signin-error" class="auth-error"></div>
+                    <button class="auth-button" id="signin-btn">Sign In</button>
+                    <p class="auth-switch">Don't have an account? <a href="#" id="show-signup">Sign up</a></p>
+                </div>
+
+                <!-- Sign Up Form -->
+                <div id="signup-form" class="auth-form" style="display: none;">
+                    <h2 class="auth-title">Create Account</h2>
+                    <div class="form-group">
+                        <label for="signup-username">Username</label>
+                        <input type="text" class="form-control" id="signup-username" placeholder="Choose a username">
+                    </div>
+                    <div class="form-group">
+                        <label for="signup-email">Email</label>
+                        <input type="email" class="form-control" id="signup-email" placeholder="Enter your email">
+                    </div>
+                    <div class="form-group">
+                        <label for="signup-password">Password</label>
+                        <input type="password" class="form-control" id="signup-password" placeholder="Choose a password">
+                    </div>
+                    <div id="signup-error" class="auth-error"></div>
+                    <button class="auth-button" id="signup-btn">Create Account</button>
+                    <p class="auth-switch">Already have an account? <a href="#" id="show-signin">Sign in</a></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Header Section -->
+        <div class="row align-items-center" id="app-header" style="display: none;">
             <div class="col">
-                <h1>Procedural Game Narrative Generation</h1>
+                <h1>🎮 Procedural Game Narrative Generation</h1>
             </div>
             <div class="col-auto">
-                <div class="btn-group" role="group" aria-label="Basic example">
-                    <button class="btn btn-primary" id="game-view-btn">Game</button>
-                    <button class="btn btn-secondary" id="options-view-btn">Options</button>
+                <span id="user-welcome" class="user-welcome"></span>
+                <button class="btn btn-secondary" id="logout-btn" style="margin-left: 1rem;">
+                    🚪 Logout
+                </button>
+                <button class="btn btn-secondary" id="back-to-menu-btn" style="display: none;">
+                    ⬅️ Main Menu
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Menu -->
+        <div id="main-menu" class="main-menu-container">
+            <div class="menu-content">
+                <h2 class="menu-title">Main Menu</h2>
+                <div class="menu-buttons">
+                    <button class="menu-button" id="menu-new-game-btn">
+                        <span class="menu-icon">✨</span>
+                        <span class="menu-text">New Game</span>
+                    </button>
+                    <button class="menu-button" id="menu-load-game-btn">
+                        <span class="menu-icon">💾</span>
+                        <span class="menu-text">Load Game</span>
+                    </button>
+                    <button class="menu-button" id="menu-api-keys-btn">
+                        <span class="menu-icon">🔑</span>
+                        <span class="menu-text">API Keys</span>
+                    </button>
+                    <button class="menu-button" id="menu-story-settings-btn">
+                        <span class="menu-icon">📖</span>
+                        <span class="menu-text">Story Settings</span>
+                    </button>
                 </div>
             </div>
         </div>
@@ -227,54 +316,41 @@
             </div>
         </div>
         <div id="options-view">
-            <ul class="nav nav-tabs">
-                <li class="nav-item">
-                    <a class="nav-link" href="" id="new-game-tab">New Game</a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="" id="load-game-tab">Load Game</a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="" id="story-settings-tab">Story Settings</a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="" id="api-keys-tab">API Keys</a>
-                </li>
-            </ul>
             <div class="form-group" id="new-game-view">
                 <div class="input">
-                    <span class="input-label">Character Name: </span>
+                    <label class="input-label" for="new-game-character-name-input">👤 Character Name</label>
                     <input type="text" class="form-control" id="new-game-character-name-input"
-                        name="new-game-character-name-input" placeholder="Optional">
+                        name="new-game-character-name-input" placeholder="Enter your character's name (optional)">
                 </div>
                 <div class="input">
-                    <span class="input-label">Age: </span>
+                    <label class="input-label" for="new-game-character-age-input">🎂 Age</label>
                     <input type="number" class="form-control" id="new-game-character-age-input"
-                        name="new-game-character-age-input" placeholder="Optional">
+                        name="new-game-character-age-input" placeholder="Enter age (optional)" min="1" max="999">
                 </div>
                 <div class="input">
-                    <span class="input-label">Gender: </span>
+                    <label class="input-label" for="new-game-character-gender-input">⚧ Gender</label>
                     <select class="form-control" id="new-game-character-gender-input"
                         name="new-game-character-gender-input">
-                        <option value="">Optional</option>
+                        <option value="">Select gender (optional)</option>
                         <option value="male">Male</option>
                         <option value="female">Female</option>
+                        <option value="other">Other</option>
                     </select>
                 </div>
                 <div class="input">
-                    <span class="input-label">Class: </span>
+                    <label class="input-label" for="new-game-character-class-input">⚔️ Class</label>
                     <select class="form-control" id="new-game-character-class-input"
                         name="new-game-character-class-input">
-                        <option value="">Optional</option>
+                        <option value="">Select class (optional)</option>
                         <!-- Options will be populated dynamically -->
                     </select>
                 </div>
                 <div class="input">
-                    <span class="input-label">Story Inspiration: </span>
+                    <label class="input-label" for="new-game-inspiration-input">💭 Story Inspiration</label>
                     <textarea class="form-control" id="new-game-inspiration-input" name="new-game-inspiration-input"
-                        placeholder="Optional" rows="3"></textarea>
+                        placeholder="Describe your story inspiration, themes, or setting ideas... (optional)" rows="4"></textarea>
                 </div>
-                <button type="button" class="submit-button" id="create-seed-btn">Create Seed</button>
+                <button type="button" class="submit-button" id="create-seed-btn">🌱 Create New Adventure</button>
             </div>
 
             <div id="load-game-view">
@@ -284,24 +360,21 @@
 
             </div>
             <div id="api-keys-view">
-                <div class="form-group row input"><span class="col-sm-2 col-form-label input-label">OpenAI API
-                        Key:
-                    </span><input class="col-sm-10" type="password" id="openai-api-key-input"
-                        name="openai-api-key-input" placeholder="Required"></div>
-                <div class="form-group row input"><span class="col-sm-2 col-form-label input-label">Groq API
-                        Key:
-                    </span><input class="col-sm-10" type="password" id="groq-api-key-input" name="groq-api-key-input"
-                        placeholder="Required"></div>
-                <button type="button" class="other-button" id="save-api-keys-btn">Save to Local Storage</button>
-                <div id="api-keys-note"><b>Note:</b> This feature is optional and will use your browsers data
-                    storage
-                    system
-                    to remember your API Keys. We <b>DO NOT</b> store or save your keys anywhere besides your
-                    own
-                    browser. This
-                    application uses these text boxes to make API calls. Both API keys are needed for this
-                    application
-                    to work.
+                <div class="input">
+                    <label class="input-label" for="openai-api-key-input">🤖 OpenAI API Key</label>
+                    <input class="form-control" type="password" id="openai-api-key-input"
+                        name="openai-api-key-input" placeholder="sk-... (Required for narrative generation)">
+                </div>
+                <div class="input">
+                    <label class="input-label" for="groq-api-key-input">⚡ Groq API Key</label>
+                    <input class="form-control" type="password" id="groq-api-key-input" name="groq-api-key-input"
+                        placeholder="gsk_... (Required for fast processing)">
+                </div>
+                <button type="button" class="other-button" id="save-api-keys-btn">💾 Save to Local Storage</button>
+                <div id="api-keys-note">
+                    <strong>🔒 Privacy Notice:</strong> This feature is optional and uses your browser's local storage
+                    to remember your API keys. We <strong>DO NOT</strong> store or transmit your keys to any server.
+                    The keys remain in your browser only. Both API keys are required for the application to function properly.
                 </div>
             </div>
         </div>

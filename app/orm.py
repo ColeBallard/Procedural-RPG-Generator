@@ -34,6 +34,15 @@ connection_string = f"mysql+pymysql://{db_config['user']}:{db_config['password']
 engine = create_engine(connection_string)
 Base = declarative_base()
 
+class User(Base):
+    __tablename__ = 'Users'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(64), unique=True, nullable=False)
+    email = Column(String(128), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
+
 class Seed(Base):
     __tablename__ = 'Seeds'
     id = Column(Integer, primary_key=True, default=lambda: random.randint(100000, 999999))
