@@ -5,8 +5,6 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, SmallInteger, BigInteger, Text, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
-from sqlalchemy.pool import Pool
-from mysql.connector import pooling
 
 # Load environment variables
 load_dotenv()
@@ -19,13 +17,6 @@ db_config = {
     "database": os.getenv("DB_NAME"),
     "port": os.getenv("DB_PORT")
 }
-
-# Initialize connection pool
-pool = pooling.MySQLConnectionPool(
-    pool_name="pgng_pool",
-    pool_size=5,
-    **db_config
-)
 
 # Create the connection string
 connection_string = f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
@@ -274,11 +265,5 @@ class QuestStep(Base):
     seed = relationship('Seed')
 
 
-# Create all tables in the database
-Base.metadata.create_all(engine)
-
 # Create a configured "Session" class
 Session = sessionmaker(bind=engine)
-
-# Create a session
-session = Session()

@@ -41,8 +41,12 @@ def createApp():
     # Create the connection string
     connection_string = f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 
-    # Create the SQLAlchemy engine
-    engine = create_engine(connection_string)
+    # Create the SQLAlchemy engine with reduced pool size
+    engine = create_engine(
+        connection_string,
+        pool_size=3,
+        max_overflow=2
+    )
     Base.metadata.create_all(engine)
 
     # Setup configuration and other necessary initializations here
