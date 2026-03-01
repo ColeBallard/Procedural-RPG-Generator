@@ -5,21 +5,22 @@ from app.orm import Location
 from app.prompt_templates import WORLD_BUILDING
 
 class LocationBuilder:
-    def __init__(self, seed_data, seed_id, session, gpt_service):
+    def __init__(self, seed_data, seed_id, session, gpt_service, progress_callback=None):
         self.seed_data = seed_data
         self.seed_id = seed_id
         self.session = session
         self.gpt_service = gpt_service
+        self.progress_callback = progress_callback or (lambda msg, status='info': None)
 
     def create_locations(self):
         retries = 0
         max_retries = 5
         while True:
             try:
-                location_text = self.get_gpt_response(WORLD_BUILDING['LOCATIONS'].format(self.seed_data))
+                location_text = self.gpt_service.get_response(WORLD_BUILDING['LOCATIONS'].format(self.seed_data))
 
                 # Parse the generated location data
-                locations = self.extract_json(location_text, list_flag=True)
+                locations = self.gpt_service.extract_json(location_text, list_flag=True)
                 if locations is None:
                     return {"message": "Failed to generate location data", "status": "failure"}
 
@@ -46,9 +47,9 @@ class LocationBuilder:
 
                     while True:
                         try:
-                            sub_location_text = self.get_gpt_response(WORLD_BUILDING['SUB_LOCATIONS'].format(loc, self.seed_data))
+                            sub_location_text = self.gpt_service.get_response(WORLD_BUILDING['SUB_LOCATIONS'].format(loc, self.seed_data))
 
-                            sub_locations = self.extract_json(sub_location_text, list_flag=True)
+                            sub_locations = self.gpt_service.extract_json(sub_location_text, list_flag=True)
 
                             for sub_loc in sub_locations:
                                 new_sub_location = Location(

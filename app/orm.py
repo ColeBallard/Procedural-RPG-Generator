@@ -264,6 +264,16 @@ class QuestStep(Base):
     seed_id = Column(Integer, ForeignKey('Seeds.id'), nullable=False)
     seed = relationship('Seed')
 
+# Settings
+class Settings(Base):
+    __tablename__ = 'Settings'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    min_grok = Column(String(64), default='grok-2-1212')
+    max_grok = Column(String(64), default='grok-2-1212')
+    emotional_attributes = Column(Text)  # JSON string
+    classes = Column(Text)  # JSON string
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
 # Create a configured "Session" class
 Session = sessionmaker(bind=engine)

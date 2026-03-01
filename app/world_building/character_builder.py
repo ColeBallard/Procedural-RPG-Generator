@@ -6,19 +6,20 @@ from app.orm import Character, Skill, CharacterSkill, Status, CharacterStatus, E
 from app.prompt_templates import WORLD_BUILDING
 
 class CharacterBuilder:
-    def __init__(self, seed_data, seed_id, session, gpt_service):
+    def __init__(self, seed_data, seed_id, session, gpt_service, progress_callback=None):
         self.seed_data = seed_data
         self.seed_id = seed_id
         self.session = session
         self.gpt_service = gpt_service
+        self.progress_callback = progress_callback or (lambda msg, status='info': None)
 
     def create_main_character(self):
         retries = 0
         max_retries = 5
         while True:
-            character_text = self.get_gpt_response(WORLD_BUILDING['MAIN_CHARACTER'].format(self.seed_data))
+            character_text = self.gpt_service.get_response(WORLD_BUILDING['MAIN_CHARACTER'].format(self.seed_data))
 
-            character_data = self.extract_json(character_text)
+            character_data = self.gpt_service.extract_json(character_text)
 
             if character_data is None:
                 print("No valid JSON data was extracted.")
@@ -85,8 +86,8 @@ class CharacterBuilder:
         max_retries = 5
 
         while retries <= max_retries:
-            skills_text = self.get_gpt_response(WORLD_BUILDING['MAIN_CHARACTER_SKILLS'].format(self.character_data, self.seed_data))
-            skills_data = self.extract_json(skills_text, list_flag=True)
+            skills_text = self.gpt_service.get_response(WORLD_BUILDING['MAIN_CHARACTER_SKILLS'].format(self.character_data, self.seed_data))
+            skills_data = self.gpt_service.extract_json(skills_text, list_flag=True)
 
             if skills_data is None:
                 print("No valid JSON data was extracted for skills.")
@@ -142,8 +143,8 @@ class CharacterBuilder:
         max_retries = 5
 
         while retries <= max_retries:
-            statuses_text = self.get_gpt_response(WORLD_BUILDING['MAIN_CHARACTER_STATUSES'].format(self.character_data, self.seed_data))
-            statuses_data = self.extract_json(statuses_text, list_flag=True)
+            statuses_text = self.gpt_service.get_response(WORLD_BUILDING['MAIN_CHARACTER_STATUSES'].format(self.character_data, self.seed_data))
+            statuses_data = self.gpt_service.extract_json(statuses_text, list_flag=True)
 
             if statuses_data is None:
                 print("No valid JSON data was extracted for statuses.")
@@ -202,8 +203,8 @@ class CharacterBuilder:
         while retries <= max_retries:
             try:
                 for location in self.locations:
-                    characters_text = self.get_gpt_response(WORLD_BUILDING['SURROUNDING_CHARACTERS'].format(location, self.seed_data))
-                    characters_data = self.extract_json(characters_text, list_flag=True)
+                    characters_text = self.gpt_service.get_response(WORLD_BUILDING['SURROUNDING_CHARACTERS'].format(location, self.seed_data))
+                    characters_data = self.gpt_service.extract_json(characters_text, list_flag=True)
 
                     if characters_data is None:
                         print("No valid JSON data was extracted for surrounding characters.")
@@ -243,8 +244,8 @@ class CharacterBuilder:
                         character['id'] = new_character.id
 
                         # Generate and assign events to the new character
-                        event_text = self.get_gpt_response(WORLD_BUILDING['CHARACTER_EVENT'].format(character, location, self.seed_data))
-                        event_data = self.extract_json(event_text, list_flag=False, nested_key='event')
+                        event_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_EVENT'].format(character, location, self.seed_data))
+                        event_data = self.gpt_service.extract_json(event_text, list_flag=False, nested_key='event')
 
                         new_event = Event(
                             seed_id=self.seed_id,
@@ -299,8 +300,8 @@ class CharacterBuilder:
         while retries <= max_retries:
             try:
                 for npc in self.NPCs_data:
-                    skills_text = self.get_gpt_response(WORLD_BUILDING['CHARACTER_SKILLS'].format(npc, self.seed_data))
-                    skills_data = self.extract_json(skills_text, list_flag=True)
+                    skills_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_SKILLS'].format(npc, self.seed_data))
+                    skills_data = self.gpt_service.extract_json(skills_text, list_flag=True)
 
                     if skills_data is None:
                         print(f"No valid JSON data was extracted for skills of character {npc['name']}.")
@@ -356,8 +357,8 @@ class CharacterBuilder:
         while retries <= max_retries:
             try:
                 for npc in self.NPCs_data:
-                    statuses_text = self.get_gpt_response(WORLD_BUILDING['CHARACTER_STATUSES'].format(npc, self.seed_data))
-                    statuses_data = self.extract_json(statuses_text, list_flag=True)
+                    statuses_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_STATUSES'].format(npc, self.seed_data))
+                    statuses_data = self.gpt_service.extract_json(statuses_text, list_flag=True)
 
                     if statuses_data is None:
                         print(f"No valid JSON data was extracted for statuses of character {npc['name']}.")
@@ -424,8 +425,8 @@ class CharacterBuilder:
                     related_character = self.NPCs_data[j]
 
                     relationship_prompt = WORLD_BUILDING['CHARACTER_RELATIONSHIP'].format(character, related_character, self.seed_data)
-                    relationship_text = self.get_gpt_response(relationship_prompt)
-                    relationship_data = self.extract_json(relationship_text, list_flag=False, nested_key='relationship')
+                    relationship_text = self.gpt_service.get_response(relationship_prompt)
+                    relationship_data = self.gpt_service.extract_json(relationship_text, list_flag=False, nested_key='relationship')
 
                     if not relationship_data:
                         continue  # If no data extracted, skip to next pair
@@ -470,8 +471,8 @@ class CharacterBuilder:
             try:
                 for npc in self.NPCs_data:
                     # Generate items for each NPC
-                    items_text = self.get_gpt_response(WORLD_BUILDING['CHARACTER_ITEMS'].format(npc, self.seed_data))
-                    items_data = self.extract_json(items_text, list_flag=True)
+                    items_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_ITEMS'].format(npc, self.seed_data))
+                    items_data = self.gpt_service.extract_json(items_text, list_flag=True)
 
                     if items_data is None:
                         print(f"No valid JSON data was extracted for items of character {npc['name']}.")
