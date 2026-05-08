@@ -3,6 +3,41 @@ import { setLocalStorageItem, getLocalStorageItem } from './utils/storage.js';
 
 let narrativeTemplate;
 
+// Read the double-submit CSRF cookie set by the server. Returned as-is and
+// echoed back in X-CSRF-Token on every state-changing request.
+function getCsrfToken() {
+    const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
+}
+
+// Inject the CSRF header on every jQuery ajax request automatically; the
+// server ignores it for safe methods so it's harmless to send always.
+$.ajaxSetup({
+    beforeSend: function (xhr) {
+        const token = getCsrfToken();
+        if (token) {
+            xhr.setRequestHeader('X-CSRF-Token', token);
+        }
+    }
+});
+
+// Compiled Handlebars templates for each entity type rendered in the
+// game-view accordions. Populated at startup by loadEntityTemplates().
+const entityTemplates = {};
+
+// Mapping of payload key -> { templateName, accordionId }
+const ENTITY_RENDER_MAP = {
+    locations:     { template: 'location',             accordion: 'locationsAccordion' },
+    events:        { template: 'event',                accordion: 'eventsAccordion' },
+    characters:    { template: 'interactingCharacter', accordion: 'charactersAccordion' },
+    quests:        { template: 'quest',                accordion: 'questsAccordion' },
+    items:         { template: 'item',                 accordion: 'itemsAccordion' },
+    skills:        { template: 'skill',                accordion: 'skillsAccordion' },
+    statuses:      { template: 'status',               accordion: 'statusesAccordion' },
+    relationships: { template: 'relationship',         accordion: 'relationshipsAccordion' },
+    stats:         { template: 'stat',                 accordion: 'statsAccordion' },
+};
+
 // === Header auto-collapse state ===
 let _headerHoverStart = null;    // timestamp (ms) when cursor entered the header
 let _headerCollapseTimer = null; // pending setTimeout id
@@ -215,7 +250,7 @@ $(document).ready(function () {
         const currentSeedId = getLocalStorageItem('current-seed-id');
         if (currentSeedId) {
             showGameView();
-            // TODO: Load the existing game state here if needed
+            loadWorldData(currentSeedId);
         }
     });
 
@@ -235,6 +270,7 @@ $(document).ready(function () {
     $('#menu-load-game-btn').click(function (e) {
         e.preventDefault();
         showView('load-game');
+        loadSavedGames();
     });
 
     $('#menu-api-keys-btn').click(function (e) {
@@ -284,6 +320,9 @@ $(document).ready(function () {
     }).fail(function (jqXHR, textStatus, errorThrown) {
         console.error('Error fetching narrative item template:', textStatus, errorThrown);
     });
+
+    // Load all per-entity Handlebars templates used by the game-view accordions
+    loadEntityTemplates();
 
     // Fetch the entire config file from the server
     $.get('/get_config', function (config) {
@@ -358,6 +397,7 @@ $(document).ready(function () {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-CSRF-Token': getCsrfToken()
                 },
                 body: JSON.stringify({
                     seed_id: seedId,
@@ -409,13 +449,14 @@ $(document).ready(function () {
                                     const event = JSON.parse(data);
 
                                     if (event.type === 'progress') {
-                                        updateNarrativeList(event.message);
+                                        updateNarrativeList({ text: event.message, kind: 'world_building' });
                                     } else if (event.type === 'complete') {
                                         console.log('World building results:', event.results);
-                                        updateNarrativeList("✓ World building completed successfully!");
+                                        updateNarrativeList({ text: "✓ World building completed successfully!", kind: 'system' });
+                                        loadWorldData(seedId);
                                         resolve(event.results);
                                     } else if (event.type === 'error') {
-                                        updateNarrativeList("✗ Error: " + event.message);
+                                        updateNarrativeList({ text: "✗ Error: " + event.message, kind: 'system' });
                                         reject(new Error(event.message));
                                     }
                                 } catch (e) {
@@ -463,14 +504,125 @@ $(document).ready(function () {
         });
     }
     
-    function updateNarrativeList(text) {
-        if (narrativeTemplate) {
-            const context = { text: text };
-            const html = narrativeTemplate(context);
-            $('#narrativeList').append(html);
-        } else {
-            console.error('Narrative item template not loaded');
+    function loadEntityTemplates() {
+        // Each entity template lives at /templates/<name>.html and is wrapped
+        // in a <script type="text/x-handlebars-template"> tag. Strip the
+        // wrapper before compiling so the inner markup is the template source.
+        const names = [
+            'location', 'event', 'interactingCharacter', 'quest',
+            'item', 'skill', 'status', 'relationship', 'stat'
+        ];
+        names.forEach(name => {
+            $.get(`/templates/${name}.html`)
+                .done(html => {
+                    const match = html.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
+                    const source = match ? match[1] : html;
+                    entityTemplates[name] = Handlebars.compile(source);
+                })
+                .fail((jqXHR, textStatus) => {
+                    console.error(`Error fetching template ${name}.html:`, textStatus);
+                });
+        });
+    }
+
+    function loadWorldData(seedId) {
+        if (!seedId) return;
+        $.ajax({
+            url: `/api/world/${seedId}`,
+            type: 'GET',
+            success: function (world) {
+                // Replay the persisted narrative transcript into the panel so
+                // refreshing or resuming a seed restores the same scrolling
+                // story the user saw originally, with per-kind styling intact.
+                $('#narrativeList').empty();
+                (world.transcript || []).forEach(entry => {
+                    updateNarrativeList(entry);
+                });
+                Object.entries(ENTITY_RENDER_MAP).forEach(([key, cfg]) => {
+                    renderEntityList(world[key] || [], cfg.template, cfg.accordion);
+                });
+            },
+            error: function (xhr) {
+                console.error('Failed to load world data:', xhr);
+            }
+        });
+    }
+
+    function renderEntityList(items, templateName, accordionId) {
+        const $container = $(`#${accordionId}`);
+        $container.empty();
+        const template = entityTemplates[templateName];
+        if (!template) {
+            console.warn(`Template '${templateName}' not loaded yet; skipping render of #${accordionId}`);
+            return;
         }
+        items.forEach(item => {
+            $container.append(template(item));
+        });
+    }
+
+    function loadSavedGames() {
+        const $view = $('#load-game-view');
+        $view.html('<h3 class="tab-heading">💾 Load Game</h3><div id="saved-games-list">Loading...</div>');
+        $.ajax({
+            url: '/api/seeds',
+            type: 'GET',
+            success: function (response) {
+                const seeds = response.seeds || [];
+                const $list = $('#saved-games-list');
+                $list.empty();
+                if (seeds.length === 0) {
+                    $list.html('<p>No saved games found.</p>');
+                    return;
+                }
+                seeds.forEach(s => {
+                    const created = s.created_at ? new Date(s.created_at).toLocaleString() : 'Unknown';
+                    const charName = s.main_character_name || '(no character)';
+                    const $row = $('<div>').addClass('saved-game-row').css({
+                        'display': 'flex', 'justify-content': 'space-between',
+                        'align-items': 'center', 'padding': '0.5rem 0',
+                        'border-bottom': '1px solid rgba(255,255,255,0.1)'
+                    });
+                    $row.append(
+                        $('<div>').html(
+                            `<strong>${charName}</strong><br>` +
+                            `<small>Seed #${s.seed_id} · Turn ${s.current_turn} · Created ${created}</small>`
+                        )
+                    );
+                    const $btn = $('<button>').addClass('btn btn-primary').text('Load').click(function () {
+                        setLocalStorageItem('current-seed-id', s.seed_id);
+                        showGameView();
+                        loadWorldData(s.seed_id);
+                    });
+                    $row.append($btn);
+                    $list.append($row);
+                });
+            },
+            error: function (xhr) {
+                $('#saved-games-list').html('<p style="color:red;">Failed to load saved games.</p>');
+                console.error('Failed to load saved games:', xhr);
+            }
+        });
+    }
+
+    // Append a narrative entry to #narrativeList. Accepts either a plain
+    // string (legacy / quick system messages) or a transcript entry object
+    // with at least { text, kind, speaker } so per-kind styling and speaker
+    // attribution survive both live-streamed messages and replayed history.
+    function updateNarrativeList(entryOrText) {
+        if (!narrativeTemplate) {
+            console.error('Narrative item template not loaded');
+            return;
+        }
+        const entry = (typeof entryOrText === 'string')
+            ? { text: entryOrText, kind: 'system' }
+            : entryOrText;
+        const context = {
+            text: entry.text,
+            kind: entry.kind || 'system',
+            speaker: entry.speaker || null,
+        };
+        $('#narrativeList').append(narrativeTemplate(context));
     }
 
     // === Header auto-collapse on hover leave ===

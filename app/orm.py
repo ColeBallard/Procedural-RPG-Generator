@@ -2,7 +2,7 @@ import os
 import random
 from datetime import datetime
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, SmallInteger, BigInteger, Text, Boolean
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, SmallInteger, BigInteger, Text, Boolean, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 
@@ -41,6 +41,7 @@ class Seed(Base):
     updated_at = Column(DateTime, default=datetime.now)
     current_date_time = Column(DateTime)
     current_turn = Column(Integer, default=1)
+    naming_themes = Column(Text)  # JSON: [{"source": "...", "theme": "..."}]
     characters = relationship('Character', back_populates='seed')
     character_items = relationship('CharacterItem', back_populates='seed')
     quests = relationship('Quest', back_populates='seed')
@@ -264,12 +265,44 @@ class QuestStep(Base):
     seed_id = Column(Integer, ForeignKey('Seeds.id'), nullable=False)
     seed = relationship('Seed')
 
+# NameLibrary: pre-seeded pool of names sourced from external libraries.
+# Populated once via scripts/seed_name_library.py and queried at world-building
+# time by NameService to assign names that match the seed's chosen themes.
+class NameLibrary(Base):
+    __tablename__ = 'NameLibrary'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(32), nullable=False, index=True)
+    theme = Column(String(64), nullable=False, index=True)
+    gender = Column(String(16), nullable=False, default='any', index=True)
+    category = Column(String(16), nullable=False, default='first', index=True)
+    name = Column(String(128), nullable=False)
+    meaning = Column(Text)
+    origin = Column(String(64))
+    created_at = Column(DateTime, default=datetime.now)
+
+# TranscriptEntry: chronological log of every text shown in the game UI for a
+# seed (world-building progress, narration, player input, combat output, etc.).
+# Persisted so the narrative panel can be replayed on refresh/resume. The id
+# column doubles as the canonical ordering tiebreaker within a seed.
+class TranscriptEntry(Base):
+    __tablename__ = 'TranscriptEntries'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    seed_id = Column(Integer, ForeignKey('Seeds.id'), nullable=False)
+    turn = Column(Integer)
+    kind = Column(String(32), nullable=False)
+    speaker = Column(String(64))
+    text = Column(Text, nullable=False)
+    meta = Column(Text)  # JSON string for kind-specific structured data
+    created_at = Column(DateTime, default=datetime.now)
+    seed = relationship('Seed')
+    __table_args__ = (Index('idx_transcript_seed_id', 'seed_id', 'id'),)
+
 # Settings
 class Settings(Base):
     __tablename__ = 'Settings'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    min_grok = Column(String(64), default='grok-2-1212')
-    max_grok = Column(String(64), default='grok-2-1212')
+    min_grok = Column(String(64), default='grok-4-1-fast-non-reasoning')
+    max_grok = Column(String(64), default='grok-4.3')
     emotional_attributes = Column(Text)  # JSON string
     classes = Column(Text)  # JSON string
     created_at = Column(DateTime, default=datetime.now)

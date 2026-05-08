@@ -247,8 +247,29 @@ CREATE TABLE `Seeds` (
   `updated_at` datetime DEFAULT NULL,
   `current_date_time` datetime DEFAULT NULL,
   `current_turn` int unsigned DEFAULT NULL,
+  `naming_themes` text,
   PRIMARY KEY (`id`)
-); 
+);
+
+-- NameLibrary definition
+
+CREATE TABLE `NameLibrary` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `source` varchar(32) NOT NULL,
+  `theme` varchar(64) NOT NULL,
+  `gender` varchar(16) NOT NULL DEFAULT 'any',
+  `category` varchar(16) NOT NULL DEFAULT 'first',
+  `name` varchar(128) NOT NULL,
+  `meaning` text,
+  `origin` varchar(64) DEFAULT NULL,
+  `created_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_namelib_source` (`source`),
+  KEY `idx_namelib_theme` (`theme`),
+  KEY `idx_namelib_gender` (`gender`),
+  KEY `idx_namelib_category` (`category`),
+  KEY `idx_namelib_lookup` (`source`, `theme`, `gender`, `category`)
+);
 
 -- Skills definition
 
@@ -285,4 +306,20 @@ CREATE TABLE `Steps` (
   `updated_at` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
   FOREIGN KEY (`location_id`) REFERENCES `Locations`(`id`)
-); 
+);
+
+-- TranscriptEntries definition
+
+CREATE TABLE `TranscriptEntries` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `seed_id` int NOT NULL,
+  `turn` int DEFAULT NULL,
+  `kind` varchar(32) NOT NULL,
+  `speaker` varchar(64) DEFAULT NULL,
+  `text` text NOT NULL,
+  `meta` text,
+  `created_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_transcript_seed_id` (`seed_id`, `id`),
+  FOREIGN KEY (`seed_id`) REFERENCES `Seeds`(`id`)
+);

@@ -240,3 +240,17 @@ Steps (
   PRIMARY KEY (id),
   FOREIGN KEY (location_id) REFERENCES Locations(id)
 )
+
+TranscriptEntries (
+  id int NOT NULL AUTO_INCREMENT,
+  seed_id int NOT NULL,
+  turn int DEFAULT NULL,
+  kind varchar(32) NOT NULL,
+  speaker varchar(64) DEFAULT NULL,
+  text text NOT NULL,
+  meta text,
+  created_at datetime DEFAULT NULL,
+  PRIMARY KEY (id),
+  KEY idx_transcript_seed_id (seed_id, id),
+  FOREIGN KEY (seed_id) REFERENCES Seeds(id)
+)

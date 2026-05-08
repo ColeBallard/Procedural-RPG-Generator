@@ -32,7 +32,9 @@
         crossorigin="anonymous"></script>
 
     <!-- Handlebars -->
-    <script src="https://cdn.jsdelivr.net/npm/handlebars@latest/dist/handlebars.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/handlebars@4.7.8/dist/handlebars.min.js"
+        integrity="sha384-/7IOPDPk7kcWe970wNJpeApuC/EzCQwonLz5G/s//R5Jji9QWBcbfASHI0G1nh2p"
+        crossorigin="anonymous"></script>
 
     <!-- Custom JS -->
     <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
@@ -45,7 +47,7 @@
             <div class="landing-content">
                 <div class="landing-header">
                     <h1 class="landing-title">Procedural RPG Generator</h1>
-                    <p class="landing-subtitle">Create your own epic adventure with AI-powered narrative generation</p>
+                    <p class="landing-subtitle">Jump into your own epic adventure</p>
                 </div>
 
                 <!-- Sign In Form -->
@@ -132,7 +134,8 @@
         </div>
         <div class="container-fluid" id="game-view">
             <div class="row">
-                <div class="col-md-3 border border-white rounded scrollable-section">
+                <div class="col-md-3">
+                    <div class="border border-white rounded scrollable-section">
                     <h3 class="title">Info</h3>
                     <div class="accordion accordion-flush" id="infoAccordion">
                         <!-- Locations Dropdown -->
@@ -187,10 +190,13 @@
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
 
                 <!-- Middle Column: Main Game Area -->
-                <div class="col-md-5 scrollable-section">
+                <div class="col-md-5">
+                    <div class="scrollable-section">
+                    <h3 class="title">Narrative</h3>
                     <div id="game-output">
                         <!-- Narrative content goes here -->
                         <ul class="nav flex-column" id="narrativeList"></ul>
@@ -206,10 +212,12 @@
 
                     <!-- Optional Battle UI -->
                     <div id="battle-ui" class="hidden"></div>
+                    </div>
                 </div>
 
                 <!-- Right Column: Player Stats and Inventory -->
-                <div class="col-md-4 border border-white rounded scrollable-section">
+                <div class="col-md-4">
+                    <div class="border border-white rounded scrollable-section">
                     <h3 class="title">Character</h3>
                     <div class="accordion accordion-flush" id="characterAccordion">
                         <!-- Quests Dropdown -->
@@ -315,6 +323,7 @@
                             </div>
                         </div>
 
+                    </div>
                     </div>
                 </div>
             </div>
@@ -440,20 +449,20 @@
                     <div class="input">
                         <label class="input-label" for="min-grok-select">Minimum Grok Model</label>
                         <select class="form-control" id="min-grok-select">
-                            <option value="grok-2-1212">grok-2-1212 ($0.20 input / $0.50 output)</option>
-                            <option value="grok-3">grok-3 (pricing varies)</option>
-                            <option value="grok-4-fast">grok-4-fast ($0.20 input / $0.50 output)</option>
-                            <option value="grok-4">grok-4 ($3.00 input / $15.00 output)</option>
+                            <option value="grok-3-mini">grok-3-mini</option>
+                            <option value="grok-3">grok-3</option>
+                            <option value="grok-4-1-fast-non-reasoning">grok-4-1-fast-non-reasoning ($0.20 input / $0.50 output)</option>
+                            <option value="grok-4.3">grok-4.3 ($1.25 input / $2.50 output)</option>
                         </select>
                     </div>
 
                     <div class="input">
                         <label class="input-label" for="max-grok-select">Maximum Grok Model</label>
                         <select class="form-control" id="max-grok-select">
-                            <option value="grok-2-1212">grok-2-1212 ($0.20 input / $0.50 output)</option>
-                            <option value="grok-3">grok-3 (pricing varies)</option>
-                            <option value="grok-4-fast">grok-4-fast ($0.20 input / $0.50 output)</option>
-                            <option value="grok-4">grok-4 ($3.00 input / $15.00 output)</option>
+                            <option value="grok-3-mini">grok-3-mini</option>
+                            <option value="grok-3">grok-3</option>
+                            <option value="grok-4-1-fast-non-reasoning">grok-4-1-fast-non-reasoning ($0.20 input / $0.50 output)</option>
+                            <option value="grok-4.3">grok-4.3 ($1.25 input / $2.50 output)</option>
                         </select>
                     </div>
                 </div>

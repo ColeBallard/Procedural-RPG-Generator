@@ -4,12 +4,20 @@ import json
 import base64
 import queue
 import threading
+import uuid
+from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from flask import Blueprint, jsonify, render_template, current_app, request, send_from_directory, session, Response, stream_with_context
 from sqlalchemy.exc import IntegrityError
+from openai import OpenAI
 
-from app.orm import Seed, User, Settings
+from app.orm import (
+    Seed, User, Settings, Character, Location, Event, Quest,
+    CharacterItem, Item, CharacterSkill, Skill, CharacterStatus, Status,
+    CharacterRelationship,
+)
+from app.services import transcript_service
 from app.world_building.world_building import WorldBuilder
 from app.prompt_templates import STEREOTYPE_ANALYSIS
 
@@ -18,6 +26,20 @@ world_builder = None
 
 # Store progress queues for each session
 progress_queues = {}
+
+
+def login_required(f):
+    """Reject unauthenticated callers when LOGIN_REQUIRED is enabled.
+
+    Tests construct ad-hoc Flask apps that don't set the flag, so the gate
+    is a no-op there. ``createApp`` flips it on for the real app.
+    """
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        if current_app.config.get('LOGIN_REQUIRED') and 'user_id' not in session:
+            return jsonify({'success': False, 'message': 'Authentication required'}), 401
+        return f(*args, **kwargs)
+    return wrapped
 
 @main.route('/', methods=['GET', 'POST'])
 def index():
@@ -28,11 +50,13 @@ def serve_template(filename):
     return send_from_directory('templates', filename)
 
 @main.route('/get_config')
+@login_required
 def get_config():
     serializable_config = make_serializable(current_app.config)
     return jsonify(serializable_config)
 
 @main.route('/create_seed', methods=['POST'])
+@login_required
 def create_seed():
     Session = current_app.config['SESSION_FACTORY']
     session = Session()
@@ -55,6 +79,7 @@ def create_seed():
             session.close()
 
 @main.route('/initialize_world_building', methods=['POST'])
+@login_required
 def initialize_world_building():
     data = request.json
     seed_id = data.get('seed_id')
@@ -81,7 +106,99 @@ def initialize_world_building():
     finally:
         db_session.close()
 
+@main.route('/initialize_world_building_stream', methods=['POST'])
+@login_required
+def initialize_world_building_stream():
+    data = request.json
+    seed_id = data.get('seed_id')
+    seed_data = data.get('seed_data')
+    grok_api_key = data.get('grok_api_key')
+
+    # Capture the real app object and config values up front so the background
+    # thread does not depend on the request-bound current_app proxy.
+    app = current_app._get_current_object()
+    session_factory = app.config['SESSION_FACTORY']
+    model = app.config['min_grok']
+
+    # Build a per-request OpenAI client so concurrent requests with different
+    # API keys cannot stomp on each other via shared mutable state.
+    openai_client = OpenAI(api_key=grok_api_key, base_url="https://api.x.ai/v1")
+
+    # Use a uuid to guarantee a unique queue id per request.
+    session_id = str(uuid.uuid4())
+    progress_queues[session_id] = queue.Queue()
+    q = progress_queues[session_id]
+
+    def run_world_builder():
+        with app.app_context():
+            db_session = session_factory()
+            try:
+                def progress_callback(msg, status='info'):
+                    # WorldBuilder emits status='info' for in-progress steps and
+                    # status='success' for the final "World building complete!"
+                    # message. Both map to the frontend's 'progress' event type;
+                    # the terminal 'complete' event is emitted below with the
+                    # full results payload. Each message is also persisted as a
+                    # TranscriptEntry so the narrative panel can be replayed
+                    # after a refresh or resume.
+                    transcript_service.add_entry(
+                        session_factory, seed_id,
+                        transcript_service.KIND_WORLD_BUILDING, msg,
+                        status=status,
+                    )
+                    q.put({'type': 'progress', 'message': msg})
+
+                world_builder = WorldBuilder(
+                    seed_data,
+                    seed_id,
+                    db_session,
+                    openai_client,
+                    model,
+                    progress_callback=progress_callback
+                )
+
+                results = world_builder.build_world()
+
+                # Persist the opening narration (if produced) as a separate
+                # transcript entry so it renders with narration styling and
+                # is replayed on refresh. WorldBuilder returns it in-band so
+                # the orchestrator stays free of session-factory plumbing.
+                intro_narration = results.pop('intro_narration', None) if isinstance(results, dict) else None
+                if intro_narration:
+                    transcript_service.add_entry(
+                        session_factory, seed_id,
+                        transcript_service.KIND_NARRATION, intro_narration,
+                        speaker='Narrator',
+                    )
+
+                q.put({'type': 'complete', 'results': results})
+            except Exception as e:
+                db_session.rollback()
+                transcript_service.add_entry(
+                    session_factory, seed_id,
+                    transcript_service.KIND_WORLD_BUILDING, str(e),
+                    status='error',
+                )
+                q.put({'type': 'error', 'message': str(e)})
+            finally:
+                db_session.close()
+                q.put(None)
+
+    def generate():
+        try:
+            threading.Thread(target=run_world_builder, daemon=True).start()
+            while True:
+                item = q.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            progress_queues.pop(session_id, None)
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream')
+
 @main.route('/api/settings', methods=['GET'])
+@login_required
 def get_settings():
     """Retrieve settings from database"""
     try:
@@ -97,8 +214,8 @@ def get_settings():
             classes = current_app.config.get('classes', [])
 
             settings_record = Settings(
-                min_grok=current_app.config.get('min_grok', 'grok-2-1212'),
-                max_grok=current_app.config.get('max_grok', 'grok-2-1212'),
+                min_grok=current_app.config.get('min_grok', 'grok-4-1-fast-non-reasoning'),
+                max_grok=current_app.config.get('max_grok', 'grok-4.3'),
                 emotional_attributes=json.dumps(emotional_attrs),
                 classes=json.dumps(classes)
             )
@@ -122,6 +239,7 @@ def get_settings():
         return jsonify({'error': str(e)}), 500
 
 @main.route('/api/settings/save', methods=['POST'])
+@login_required
 def save_settings():
     """Save settings to database"""
     try:
@@ -137,8 +255,8 @@ def save_settings():
             session.add(settings_record)
 
         # Update settings
-        settings_record.min_grok = data.get('min_grok', 'grok-2-1212')
-        settings_record.max_grok = data.get('max_grok', 'grok-2-1212')
+        settings_record.min_grok = data.get('min_grok', 'grok-4-1-fast-non-reasoning')
+        settings_record.max_grok = data.get('max_grok', 'grok-4.3')
         settings_record.emotional_attributes = json.dumps(data.get('emotional_attributes', {}))
         settings_record.classes = json.dumps(data.get('classes', []))
         settings_record.updated_at = datetime.datetime.now()
@@ -156,7 +274,326 @@ def save_settings():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@main.route('/api/seeds', methods=['GET'])
+@login_required
+def list_seeds():
+    """Return all saved seeds with their main character name and creation time."""
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+    try:
+        seeds = db_session.query(Seed).order_by(Seed.created_at.desc()).all()
+        result = []
+        for seed in seeds:
+            main_char = (
+                db_session.query(Character)
+                .filter(Character.seed_id == seed.id, Character.main_character == True)
+                .first()
+            )
+            result.append({
+                'seed_id': seed.id,
+                'created_at': seed.created_at.isoformat() if seed.created_at else None,
+                'updated_at': seed.updated_at.isoformat() if seed.updated_at else None,
+                'current_turn': seed.current_turn,
+                'main_character_name': main_char.name if main_char else None,
+            })
+        return jsonify({'seeds': result}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db_session.close()
+
+
+@main.route('/api/world/<int:seed_id>', methods=['GET'])
+@login_required
+def get_world(seed_id):
+    """Return all world data for a given seed: locations, events, NPCs,
+    main character (with stats, items, skills, statuses, relationships) and quests."""
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+    try:
+        seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+        if not seed:
+            return jsonify({'error': 'Seed not found'}), 404
+
+        locations = [
+            {
+                'id': loc.id,
+                'name': loc.name,
+                'description': loc.description or '',
+                'type': loc.type,
+                'climate': loc.climate,
+                'terrain': loc.terrain,
+                'parent_id': loc.parent_id,
+            }
+            for loc in db_session.query(Location).filter(Location.seed_id == seed_id).all()
+        ]
+
+        events = [
+            {
+                'id': ev.id,
+                'name': ev.name,
+                'description': ev.description or '',
+                'type': ev.type,
+                'location_id': ev.location_id,
+                'start_turn': ev.start_turn,
+                'end_turn': ev.end_turn,
+            }
+            for ev in db_session.query(Event).filter(Event.seed_id == seed_id).all()
+        ]
+
+        main_character = (
+            db_session.query(Character)
+            .filter(Character.seed_id == seed_id, Character.main_character == True)
+            .first()
+        )
+
+        # Fetch MC's outbound relationships up front so we can both annotate
+        # the NPC list with acquaintance level and reuse the rows when
+        # building the relationships payload below.
+        mc_relationship_rows = []
+        familiarity_by_npc = {}
+        if main_character:
+            mc_relationship_rows = (
+                db_session.query(CharacterRelationship)
+                .filter(CharacterRelationship.character_id == main_character.id)
+                .all()
+            )
+            familiarity_by_npc = {
+                rel.related_character_id: (rel.familiarity or 0)
+                for rel in mc_relationship_rows
+            }
+
+        npcs = [
+            _npc_payload(c, familiarity_by_npc.get(c.id, 0))
+            for c in db_session.query(Character)
+            .filter(Character.seed_id == seed_id, Character.main_character == False)
+            .all()
+        ]
+        # Surface known NPCs first so the accordion groups acquaintances
+        # ahead of strangers without the frontend needing extra logic.
+        npcs.sort(key=lambda n: (-n['familiarity'], n['name'] or ''))
+
+        main_character_data = None
+        items = []
+        skills = []
+        statuses = []
+        relationships = []
+        stats = []
+
+        if main_character:
+            main_character_data = {
+                'id': main_character.id,
+                'name': main_character.name,
+                'race': main_character.race,
+                'level': main_character.level,
+                'exp_points': main_character.exp_points,
+                'current_health': main_character.current_health,
+                'max_health': main_character.max_health,
+                'current_currency': main_character.current_currency,
+            }
+
+            stats = _build_stats(main_character)
+
+            items = [
+                {
+                    'id': ci.id,
+                    'name': ci.item.name if ci.item else 'Unknown Item',
+                    'description': _item_description(ci),
+                }
+                for ci in db_session.query(CharacterItem)
+                .filter(CharacterItem.character_id == main_character.id)
+                .all()
+            ]
+
+            skills = [
+                {
+                    'id': cs.id,
+                    'name': cs.skill.name if cs.skill else 'Unknown Skill',
+                    'description': _skill_description(cs),
+                }
+                for cs in db_session.query(CharacterSkill)
+                .filter(CharacterSkill.character_id == main_character.id)
+                .all()
+            ]
+
+            statuses = [
+                {
+                    'id': cst.id,
+                    'name': cst.status.name if cst.status else 'Unknown Status',
+                    'description': _status_description(cst),
+                }
+                for cst in db_session.query(CharacterStatus)
+                .filter(CharacterStatus.character_id == main_character.id)
+                .all()
+            ]
+
+            relationships = [
+                {
+                    'id': rel.id,
+                    'name': rel.related_character.name if rel.related_character else 'Unknown',
+                    'description': _relationship_description(rel),
+                    'familiarity': rel.familiarity or 0,
+                    'acquaintance_level': _acquaintance_level(rel.familiarity),
+                }
+                for rel in mc_relationship_rows
+            ]
+
+        quests = [
+            {
+                'id': q.id,
+                'name': q.name,
+                'description': q.description or '',
+                'currency_reward': q.currency_reward,
+                'exp_reward': q.exp_reward,
+            }
+            for q in db_session.query(Quest).filter(Quest.seed_id == seed_id).all()
+        ]
+
+        transcript = transcript_service.list_for_seed(db_session, seed_id)
+
+        return jsonify({
+            'seed_id': seed_id,
+            'current_turn': seed.current_turn,
+            'main_character': main_character_data,
+            'locations': locations,
+            'events': events,
+            'characters': npcs,
+            'items': items,
+            'skills': skills,
+            'statuses': statuses,
+            'relationships': relationships,
+            'stats': stats,
+            'quests': quests,
+            'transcript': transcript,
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db_session.close()
+
+
+def _character_description(c, acquaintance_level='close'):
+    # Unknown NPCs only expose that they are deceased (visible at a glance);
+    # race and level read like privileged knowledge the MC shouldn't have
+    # for a stranger they've never met.
+    if acquaintance_level == 'unknown':
+        return 'Deceased' if c.alive is False else 'An unfamiliar face.'
+    parts = []
+    if c.race:
+        parts.append(f"Race: {c.race}")
+    if c.level is not None and acquaintance_level in ('acquainted', 'close'):
+        parts.append(f"Level: {c.level}")
+    if c.alive is False:
+        parts.append("Deceased")
+    return ', '.join(parts) if parts else ''
+
+
+# Familiarity buckets shared by /api/world response and the per-NPC payload.
+# Mirrors the semantics described for the seeded MC<->NPC relationships:
+#   0      -> never met
+#   1-3    -> seen / heard of
+#   4-7    -> knows them
+#   8-10   -> close
+def _acquaintance_level(familiarity):
+    f = familiarity or 0
+    if f <= 0:
+        return 'unknown'
+    if f <= 3:
+        return 'seen'
+    if f <= 7:
+        return 'acquainted'
+    return 'close'
+
+
+_ACQUAINTANCE_ICONS = {
+    'unknown': '❓',
+    'seen': '👁️',
+    'acquainted': '👤',
+    'close': '💖',
+}
+
+
+def _npc_payload(c, familiarity):
+    level = _acquaintance_level(familiarity)
+    display_name = 'Stranger' if level == 'unknown' else c.name
+    return {
+        'id': c.id,
+        'name': c.name,
+        'display_name': display_name,
+        'display_icon': _ACQUAINTANCE_ICONS[level],
+        'description': _character_description(c, level),
+        'race': c.race,
+        'level': c.level,
+        'alive': c.alive,
+        'familiarity': familiarity,
+        'acquaintance_level': level,
+    }
+
+
+def _item_description(ci):
+    parts = []
+    if ci.item and ci.item.description:
+        parts.append(ci.item.description)
+    if ci.quantity is not None:
+        parts.append(f"Quantity: {ci.quantity}")
+    if ci.condition is not None:
+        parts.append(f"Condition: {ci.condition}")
+    return ' — '.join(parts) if parts else ''
+
+
+def _skill_description(cs):
+    parts = []
+    if cs.skill and cs.skill.description:
+        parts.append(cs.skill.description)
+    if cs.level is not None:
+        parts.append(f"Level: {cs.level}")
+    return ' — '.join(parts) if parts else ''
+
+
+def _status_description(cst):
+    parts = []
+    if cst.status and cst.status.description:
+        parts.append(cst.status.description)
+    if cst.active is not None:
+        parts.append(f"Active: {bool(cst.active)}")
+    return ' — '.join(parts) if parts else ''
+
+
+def _relationship_description(rel):
+    parts = []
+    if rel.relationship_type:
+        parts.append(f"Type: {rel.relationship_type}")
+    parts.append(
+        f"Attraction: {rel.attraction}, Respect: {rel.respect}, "
+        f"Trust: {rel.trust}, Familiarity: {rel.familiarity}, "
+        f"Anger: {rel.anger}, Fear: {rel.fear}"
+    )
+    return ' — '.join(parts)
+
+
+def _build_stats(c):
+    fields = [
+        ('strength', 'Strength'),
+        ('speed', 'Speed'),
+        ('agility', 'Agility'),
+        ('intelligence', 'Intelligence'),
+        ('wisdom', 'Wisdom'),
+        ('charisma', 'Charisma'),
+        ('current_health', 'Current Health'),
+        ('max_health', 'Max Health'),
+        ('current_currency', 'Currency'),
+        ('level', 'Level'),
+        ('exp_points', 'Experience'),
+    ]
+    return [
+        {'id': key, 'name': label, 'description': str(getattr(c, key))}
+        for key, label in fields
+        if getattr(c, key) is not None
+    ]
+
+
 @main.route('/test-grok-key', methods=['POST'])
+@login_required
 def test_grok_key():
     api_key = request.json['api_key']
     headers = {
@@ -164,7 +601,7 @@ def test_grok_key():
         'Content-Type': 'application/json'
     }
     body = {
-        "model": "grok-2-1212",
+        "model": "grok-4-1-fast-non-reasoning",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello!"}
@@ -255,6 +692,7 @@ def check_auth():
     return jsonify({'authenticated': False}), 200
 
 @main.route('/analyze_stereotype', methods=['POST'])
+@login_required
 def analyze_stereotype():
     """Analyze an uploaded image and generate a stereotypical character build using Grok Vision API"""
     try:

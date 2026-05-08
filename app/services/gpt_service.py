@@ -1,88 +1,72 @@
 # gpt_service.py
+import json
+
+
 class GPTService:
     def __init__(self, openai, model):
         self.openai = openai
         self.model = model
 
-    def get_response(self, prompt):
-        response = self.openai.chat.completions.create(
-            model=self.model,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
+    def get_response(self, prompt, json_mode=False, temperature=None):
+        kwargs = {
+            'model': self.model,
+            'messages': [{'role': 'user', 'content': prompt}],
+        }
+        if json_mode:
+            kwargs['response_format'] = {'type': 'json_object'}
+        if temperature is not None:
+            kwargs['temperature'] = temperature
+        response = self.openai.chat.completions.create(**kwargs)
         return response.choices[0].message.content.strip()
 
-    def extract_json(self, text, list_flag=False, nested_key=None):
-        import json, traceback
+    def get_structured(self, prompt, schema, max_attempts=2, temperature=None):
+        """Call the LLM and validate the response against a Pydantic schema.
+
+        Returns a parsed model instance on success, or ``None`` after
+        exhausting ``max_attempts``.
+
+        Args:
+            prompt: The prompt string to send to the LLM.
+            schema: A Pydantic model class to validate the response against.
+            max_attempts: Number of retry attempts before giving up.
+            temperature: Optional sampling temperature (0.0–2.0). Higher values
+                produce more varied output; lower values are more deterministic.
+                Defaults to the model's built-in default when ``None``.
+
+        Failure modes recovered from per-attempt:
+          * model refused JSON-mode -> retry without it
+          * unparseable JSON         -> retry
+          * Pydantic validation error -> retry
+        """
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                try:
+                    text = self.get_response(prompt, json_mode=True, temperature=temperature)
+                except Exception:
+                    text = self.get_response(prompt, temperature=temperature)
+
+                data = self._parse_json_payload(text)
+                if data is None:
+                    last_error = 'no JSON could be extracted from response'
+                    continue
+
+                return schema.model_validate(data)
+            except Exception as e:
+                last_error = e
+                print(f'get_structured attempt {attempt}/{max_attempts} failed: {e}')
+                continue
+        print(f'get_structured exhausted retries; last error: {last_error}')
+        return None
+
+    @staticmethod
+    def _parse_json_payload(text):
         try:
-            if list_flag:
-                start_index = text.index("[")
-                end_index = text.rindex("]") + 1
-            else:
-                start_index = text.index("{")
-                end_index = text.rindex("}") + 1
-
-            json_str = text[start_index:end_index]
-            json_obj = json.loads(json_str)
-
-            if nested_key and nested_key in json_obj:
-                json_obj = json_obj[nested_key]
-
-            if list_flag:
-                json_obj = [self.remap_object(item) for item in json_obj]
-            else:
-                json_obj = self.remap_object(json_obj)
-
-            return json_obj
+            start = text.index('{')
+            end = text.rindex('}') + 1
+            return json.loads(text[start:end])
         except Exception as e:
-            print("Failed to extract or parse JSON:", e)
+            print(f'Failed to parse JSON payload: {e}')
             return None
 
-    def remap_fields(self, obj, field_map):
-        new_obj = obj.copy()
-        for new_field, old_fields in field_map.items():
-            for old_field in old_fields:
-                if old_field in obj:
-                    new_obj[new_field] = obj[old_field]
-                    break
-        return new_obj
 
-    def remap_object(self, obj):
-        from datetime import datetime
-        field_map = {
-            'name': ['character_name', 'name', 'event_name'],
-            'description': ['description', 'event_description'],
-            'type': ['type', 'event_type', 'relationship_type'],
-            'role': ['role', 'event_role', 'character_role'],
-            'date_of_birth': ['date_of_birth', 'birth_date'],
-            'race': ['race', 'character_race'],
-            'gender': ['gender', 'character_gender'],
-            'current_date_time': ['current_date_time', 'current_datetime'],
-            'attraction': ['attraction', 'relationship_attraction', 'character_attraction'],
-            'respect': ['respect', 'relationship_respect', 'character_respect'],
-            'trust': ['trust', 'relationship_trust', 'character_trust'],
-            'familiarity': ['familiarity', 'relationship_familiarity', 'character_familiarity'],
-            'anger': ['anger', 'relationship_anger', 'character_anger'],
-            'fear': ['fear', 'relationship_fear', 'character_fear']
-        }
-
-        obj = self.remap_fields(obj, field_map)
-
-        if 'gender' in obj:
-            gender_map = {'Female': False, 'Male': True}
-            obj['gender'] = gender_map.get(obj['gender'], None)
-
-        if 'date_of_birth' in obj:
-            try:
-                obj['date_of_birth'] = datetime.strptime(obj['date_of_birth'], "%Y-%m-%d")
-            except Exception as e:
-                print(f"Can't format date {obj['date_of_birth']} due to {e}.")
-                obj['date_of_birth'] = None
-
-        if 'current_date_time' in obj:
-            try:
-                obj['current_date_time'] = datetime.strptime(obj['current_date_time'], "%Y-%m-%d")
-            except Exception as e:
-                print(f"Can't format date {obj['current_date_time']} due to {e}.")
-                obj['current_date_time'] = None
-
-        return obj

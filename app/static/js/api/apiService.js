@@ -1,7 +1,12 @@
+function _readCsrfCookie() {
+    const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
+}
+
 async function fetchData(url, method='GET', data=null) {
     const headers = {
         'Content-Type': 'application/json',
-        // Add more headers if needed
+        'X-CSRF-Token': _readCsrfCookie(),
     };
     const body = data ? JSON.stringify(data) : null;
     try {

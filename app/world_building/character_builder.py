@@ -1,519 +1,483 @@
 # character_builder.py
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import random
 import traceback
-from app.orm import Character, Skill, CharacterSkill, Status, CharacterStatus, Event, EventCharacter, CharacterRelationship, Item, CharacterItem, Seed
+
+from app.orm import (
+    Character, Skill, CharacterSkill, Status, CharacterStatus,
+    Event, EventCharacter, CharacterRelationship, Item, CharacterItem, Seed,
+)
 from app.prompt_templates import WORLD_BUILDING
+from app.world_building.schemas import (
+    MainCharacterOut, NPCListOut, RelationshipOut,
+)
+
 
 class CharacterBuilder:
-    def __init__(self, seed_data, seed_id, session, gpt_service, progress_callback=None):
+    # Bound on concurrent LLM calls so we don't blow past xAI rate limits.
+    _MAX_WORKERS = 8
+
+    def __init__(self, seed_data, seed_id, session, gpt_service,
+                 progress_callback=None, name_service=None):
         self.seed_data = seed_data
         self.seed_id = seed_id
         self.session = session
         self.gpt_service = gpt_service
+        self.name_service = name_service
         self.progress_callback = progress_callback or (lambda msg, status='info': None)
 
+    def _seeded_name_or_none(self, gender, category='first'):
+        """Pull a name from NameLibrary using the seed's persisted themes."""
+        if self.name_service is None:
+            return None
+        themes = self.name_service.get_themes_for_seed(self.seed_id)
+        if not themes:
+            return None
+        return self.name_service.random_name(themes, gender=gender, category=category)
+
+    @staticmethod
+    def _seed_data_has_name(seed_data):
+        """Detect a user-provided main-character name on the incoming seed."""
+        if not isinstance(seed_data, dict):
+            return False
+        for key in ('character_name', 'name', 'main_character_name'):
+            v = seed_data.get(key)
+            if isinstance(v, str) and v.strip():
+                return True
+        return False
+
     def create_main_character(self):
-        retries = 0
-        max_retries = 5
-        while True:
-            character_text = self.gpt_service.get_response(WORLD_BUILDING['MAIN_CHARACTER'].format(self.seed_data))
+        """Single batched call: core stats + skills + statuses in one LLM round-trip."""
+        payload = self.gpt_service.get_structured(
+            WORLD_BUILDING['MAIN_CHARACTER_BATCH'].format(self.seed_data),
+            MainCharacterOut,
+            max_attempts=3,
+            temperature=1.1,
+        )
 
-            character_data = self.gpt_service.extract_json(character_text)
+        if payload is None:
+            print("No valid JSON data was extracted.")
+            return {"message": "Failed to create main character due to invalid data",
+                    "status": "failure"}
 
-            if character_data is None:
-                print("No valid JSON data was extracted.")
-                return {"message": "Failed to create main character due to invalid data", "status": "failure"}
+        try:
+            stats = {s: random.randint(8, 16) for s in
+                     ('strength', 'speed', 'agility', 'intelligence', 'wisdom', 'charisma')}
 
-            # Adding random attributes if they are not set
-            stats = ['strength', 'speed', 'agility', 'intelligence', 'wisdom', 'charisma']
-            for stat in stats:
-                if stat not in character_data or character_data[stat] is None:
-                    character_data[stat] = random.randint(8, 16)  # Ensure all stats have a value
+            # Override the LLM name with one drawn from the seed's chosen
+            # naming themes UNLESS the user explicitly supplied a name.
+            name = payload.name
+            if not self._seed_data_has_name(self.seed_data):
+                seeded = self._seeded_name_or_none(payload.gender, category='first')
+                if seeded:
+                    name = seeded
 
-            try:
-                new_character = Character(
-                    seed_id=self.seed_id,
-                    main_character=1,  # True as this is the main character
-                    alive=1,  # Initially alive
-                    name=character_data['name'],
-                    date_of_birth=character_data['date_of_birth'],
-                    race=character_data['race'],
-                    gender=character_data['gender'],
-                    level=1,  # Starts at level 1
-                    exp_points=0,  # No experience points initially
-                    created_at=datetime.now(),
+            new_character = Character(
+                seed_id=self.seed_id,
+                main_character=1,
+                alive=1,
+                name=name,
+                date_of_birth=payload.date_of_birth,
+                race=payload.race,
+                gender=payload.gender,
+                level=1,
+                exp_points=0,
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+                current_health=100,
+                max_health=100,
+                current_currency=0,
+                **stats,
+            )
+            self.session.add(new_character)
+            self.session.flush()
+
+            if payload.current_date_time:
+                seed = self.session.query(Seed).filter(Seed.id == self.seed_id).one()
+                seed.current_date_time = payload.current_date_time
+
+            for skill in payload.skills:
+                new_skill = Skill(name=skill.name, description=skill.description,
+                                  created_at=datetime.now(), updated_at=datetime.now())
+                self.session.add(new_skill)
+                self.session.flush()
+                self.session.add(CharacterSkill(
+                    seed_id=self.seed_id, character_id=new_character.id,
+                    skill_id=new_skill.id, level=1, exp_points=0,
+                    created_at=datetime.now(), updated_at=datetime.now(),
+                ))
+
+            for st in payload.statuses:
+                new_status = Status(name=st.name, description=st.description, type=st.type,
+                                    duration=st.duration, created_at=datetime.now(),
+                                    updated_at=datetime.now())
+                self.session.add(new_status)
+                self.session.flush()
+                self.session.add(CharacterStatus(
+                    seed_id=self.seed_id, character_id=new_character.id,
+                    status_id=new_status.id, active=False,
+                    end_date_time=datetime.now(), created_at=datetime.now(),
                     updated_at=datetime.now(),
-                    strength=character_data['strength'],
-                    speed=character_data['speed'],
-                    agility=character_data['agility'],
-                    intelligence=character_data['intelligence'],
-                    wisdom=character_data['wisdom'],
-                    charisma=character_data['charisma'],
-                    current_health=100,
-                    max_health=100,
-                    current_currency=0  # No currency initially
-                )
-                self.session.add(new_character)
-                self.session.commit()
+                ))
 
-                if 'current_date_time' in character_data:
-                    # Fetch the seed record by seed_id
-                    seed = self.session.query(Seed).filter(Seed.id == self.seed_id).one()
-                    
-                    # Update the current_date_time
-                    seed.current_date_time = character_data['current_date_time']
+            self.session.commit()
 
-                    # Commit the changes to the database
-                    self.session.commit()
+            self.character_data = {
+                'id': new_character.id,
+                'name': name,
+                'race': payload.race,
+                'gender': payload.gender,
+                'date_of_birth': payload.date_of_birth,
+                'current_date_time': payload.current_date_time,
+                'skills': [s.model_dump() for s in payload.skills],
+                'statuses': [s.model_dump() for s in payload.statuses],
+                **stats,
+            }
 
-                self.character_data = character_data
-                self.character_data['id'] = new_character.id
-
-                print('Main character created successfully')
-                return {"message": "Main character created successfully", "status": "success"}
-            except Exception as e:
-                retries += 1
-                self.session.rollback()
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for main character. Unable to properly world build.')
-                    return {"message": f"Failed to create main character. {traceback.print_exc()}", "status": "failure"}
-                else:
-                    print(f'Error occured for main character world building. Retrying attempt {retries}/{max_retries}. {traceback.print_exc()}.')
+            print('Main character created successfully')
+            return {"message": "Main character created successfully", "status": "success"}
+        except Exception as e:
+            self.session.rollback()
+            traceback.print_exc()
+            return {"message": f"Failed to create main character. {e}", "status": "failure"}
 
     def create_main_character_skills(self):
-        retries = 0
-        max_retries = 5
+        """No-op: skills are batched into create_main_character. Preserved for
+        backwards compatibility with the legacy WorldBuilder result schema."""
+        count = len(self.character_data.get('skills', [])) if hasattr(self, 'character_data') else 0
+        return {"message": f"Main character skills batched ({count}).", "status": "success"}
 
-        while retries <= max_retries:
-            skills_text = self.gpt_service.get_response(WORLD_BUILDING['MAIN_CHARACTER_SKILLS'].format(self.character_data, self.seed_data))
-            skills_data = self.gpt_service.extract_json(skills_text, list_flag=True)
-
-            if skills_data is None:
-                print("No valid JSON data was extracted for skills.")
-                retries += 1
-                continue
-
-            try:
-                for skill in skills_data:
-                    # Create a new Skill instance
-                    new_skill = Skill(
-                        name=skill['name'],
-                        description=skill['description'],
-                        created_at=datetime.now(),
-                        updated_at=datetime.now()
-                    )
-                    self.session.add(new_skill)
-                    self.session.flush()  # Flush to get the skill_id before committing
-
-                    # Create a CharacterSkill instance linking the character to the new skill
-                    new_character_skill = CharacterSkill(
-                        seed_id=self.seed_id,
-                        character_id=self.character_data['id'],  # Assume character_data has the character's id
-                        skill_id=new_skill.id,
-                        level=1,  # Randomly assign a level or based on some logic
-                        exp_points=0,
-                        created_at=datetime.now(),
-                        updated_at=datetime.now()
-                    )
-                    self.session.add(new_character_skill)
-
-                    
-
-                self.character_data['skills'] = skills_data
-
-                self.session.commit()
-
-                print("Main character skills created successfully")
-                return {"message": "Main character skills created successfully", "status": "success"}
-
-            except Exception as e:
-                self.session.rollback()
-                retries += 1
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for main character skills. Unable to properly world build.')
-                    return {"message": f"Failed to create main character skills. {traceback.print_exc()}", "status": "failure"}
-                else:
-                    print(f'Error occurred for main character skills world building. Retrying attempt {retries}/{max_retries}. {traceback.print_exc()}')
-
-        return {"message": "Failed to create main character skills after multiple attempts.", "status": "failure"}
-    
     def create_main_character_statuses(self):
-        retries = 0
-        max_retries = 5
+        """No-op: statuses are batched into create_main_character."""
+        count = len(self.character_data.get('statuses', [])) if hasattr(self, 'character_data') else 0
+        return {"message": f"Main character statuses batched ({count}).", "status": "success"}
 
-        while retries <= max_retries:
-            statuses_text = self.gpt_service.get_response(WORLD_BUILDING['MAIN_CHARACTER_STATUSES'].format(self.character_data, self.seed_data))
-            statuses_data = self.gpt_service.extract_json(statuses_text, list_flag=True)
-
-            if statuses_data is None:
-                print("No valid JSON data was extracted for statuses.")
-                retries += 1
-                continue
-
-            try:
-                for status in statuses_data:
-                    # Create a new Status instance
-                    new_status = Status(
-                        name=status['name'],
-                        description=status['description'],
-                        type=status['type'],
-                        duration=status.get('duration', 0),  # Default duration to 0 if not specified
-                        created_at=datetime.now(),
-                        updated_at=datetime.now()
-                    )
-                    self.session.add(new_status)
-                    self.session.flush()  # Flush to get the status_id before committing
-
-                    # Create a CharacterStatus instance linking the character to the new status
-                    new_character_status = CharacterStatus(
-                        seed_id=self.seed_id,
-                        character_id=self.character_data['id'],  # Assume character_data has the character's id
-                        status_id=new_status.id,
-                        active=False,  # Assume the status is initially active
-                        end_date_time=datetime.now(),  # Calculate end time if applicable
-                        created_at=datetime.now(),
-                        updated_at=datetime.now()
-                    )
-                    self.session.add(new_character_status)
-
-                    
-
-                self.character_data['statuses'] = statuses_data  # Store for any further processing
-
-                self.session.commit()
-
-                print("Main character statuses created successfully")
-                return {"message": "Main character statuses created successfully", "status": "success"}
-
-            except Exception as e:
-                self.session.rollback()
-                retries += 1
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for main character statuses. Unable to properly world build.')
-                    return {"message": f"Failed to create main character statuses. {traceback.print_exc()}", "status": "failure"}
-                else:
-                    print(f'Error occurred for main character statuses world building. Retrying attempt {retries}/{max_retries}. {traceback.print_exc()}')
-
-        return {"message": "Failed to create main character statuses after multiple attempts.", "status": "failure"}
-    
+    # ------------------------------------------------------------------ #
+    # Surrounding characters (NPCs)                                       #
+    # ------------------------------------------------------------------ #
     def create_surrounding_characters(self):
-        retries = 0
-        max_retries = 5
-        while retries <= max_retries:
-            try:
-                for location in self.locations:
-                    characters_text = self.gpt_service.get_response(WORLD_BUILDING['SURROUNDING_CHARACTERS'].format(location, self.seed_data))
-                    characters_data = self.gpt_service.extract_json(characters_text, list_flag=True)
+        """Generate NPCs for every location in parallel using a thread pool.
 
-                    if characters_data is None:
-                        print("No valid JSON data was extracted for surrounding characters.")
-                        retries += 1
-                        continue
+        Each location triggers ONE batched LLM call that returns the NPC core
+        data plus event, skills, statuses, and items. Workers only do LLM
+        work; database writes happen on the orchestrating thread.
+        """
+        if not getattr(self, 'locations', None):
+            self.NPCs_data = []
+            return {"message": "No locations available; nothing to populate.",
+                    "status": "success"}
 
-                    for character in characters_data:
-                        level = random.randint(1, 3)
-                                             
-                        new_character = Character(
-                            seed_id=self.seed_id,
-                            main_character=False,
-                            alive=True,
-                            name=character['name'],
-                            date_of_birth=character['date_of_birth'],
-                            race=character['race'],
-                            gender=character['gender'],
-                            level=level,
-                            exp_points=100*((2**(level-1))-1),
-                            created_at=datetime.now(),
-                            updated_at=datetime.now(),
-                            strength=random.randint(4, 16)+level,
-                            speed=random.randint(4, 16)+level,
-                            agility=random.randint(4, 16)+level,
-                            intelligence=random.randint(4, 16)+level,
-                            wisdom=random.randint(4, 16)+level,
-                            charisma=random.randint(4, 16)+level,
-                            current_health=100*level,
-                            max_health=100*level,
-                            current_currency=random.randint(0, 1000)
-                        )
-                        self.session.add(new_character)
-                        self.session.flush()  # Flush to ensure new_character.id is available
+        npcs_per_location = {}
+        with ThreadPoolExecutor(max_workers=self._MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(self._fetch_npcs_for_location, loc): loc
+                for loc in self.locations
+            }
+            for future in as_completed(futures):
+                loc = futures[future]
+                try:
+                    npcs_per_location[loc['id']] = future.result() or []
+                except Exception as e:
+                    print(f"NPC fetch failed for location {loc.get('name')}: {e}")
+                    npcs_per_location[loc['id']] = []
 
-                        print('Created surrounding player.')
+        all_npcs_data = []
+        for location in self.locations:
+            for npc in npcs_per_location.get(location['id'], []):
+                try:
+                    persisted = self._persist_npc(npc, location)
+                    if persisted is not None:
+                        all_npcs_data.append(persisted)
+                except Exception as e:
+                    self.session.rollback()
+                    print(f"Failed to persist NPC '{getattr(npc, 'name', '?')}' "
+                          f"in {location.get('name')}: {e}")
+                    continue
 
-                        character['id'] = new_character.id
+        self.NPCs_data = all_npcs_data
+        print(f"Surrounding characters created: {len(all_npcs_data)} NPCs")
+        return {"message": "Surrounding characters and their events created successfully",
+                "status": "success"}
 
-                        # Generate and assign events to the new character
-                        event_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_EVENT'].format(character, location, self.seed_data))
-                        event_data = self.gpt_service.extract_json(event_text, list_flag=False, nested_key='event')
+    def _fetch_npcs_for_location(self, location):
+        payload = self.gpt_service.get_structured(
+            WORLD_BUILDING['NPCS_FOR_LOCATION_BATCH'].format(location, self.seed_data),
+            NPCListOut,
+            max_attempts=2,
+            temperature=1.1,
+        )
+        return list(payload.npcs) if payload else []
 
-                        new_event = Event(
-                            seed_id=self.seed_id,
-                            name=event_data['name'],
-                            description=event_data['description'],
-                            start_date_time=self.character_data['current_date_time'] - timedelta(hours=random.randint(1, 5)) if self.character_data['current_date_time'] else None,
-                            end_date_time=self.character_data['current_date_time'] if self.character_data['current_date_time'] else None,
-                            type=event_data['type'],
-                            location_id=location['id'],
-                            start_turn=1,
-                            end_turn=1,
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_event)
-                        self.session.flush()  # Flush to ensure new_event.id is available
+    def _persist_npc(self, npc, location):
+        level = random.randint(1, 3)
 
-                        new_event_character = EventCharacter(
-                            seed_id=self.seed_id,
-                            character_id=new_character.id,
-                            event_id=new_event.id,
-                            role=event_data['role'],
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_event_character)
-                    
-                        self.session.commit()  # Commit after processing each location
+        # Override the LLM-generated NPC name with one drawn from the seed's
+        # naming themes whenever the library has a match. NPCs always defer
+        # to the library since the user only ever pre-names the protagonist.
+        seeded = self._seeded_name_or_none(npc.gender, category='first')
+        npc_name = seeded if seeded else npc.name
 
-                        print('Created surrounding player event.')
+        new_character = Character(
+            seed_id=self.seed_id,
+            main_character=False,
+            alive=True,
+            name=npc_name,
+            date_of_birth=npc.date_of_birth,
+            race=npc.race,
+            gender=npc.gender,
+            level=level,
+            exp_points=100 * ((2 ** (level - 1)) - 1),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            strength=random.randint(4, 16) + level,
+            speed=random.randint(4, 16) + level,
+            agility=random.randint(4, 16) + level,
+            intelligence=random.randint(4, 16) + level,
+            wisdom=random.randint(4, 16) + level,
+            charisma=random.randint(4, 16) + level,
+            current_health=100 * level,
+            max_health=100 * level,
+            current_currency=random.randint(0, 1000),
+        )
+        self.session.add(new_character)
+        self.session.flush()
 
-                self.NPCs_data = characters_data
-                
-                print("Surrounding characters and their events created successfully")
-                return {"message": "Surrounding characters and their events created successfully", "status": "success"}
-            except Exception as e:
-                self.session.rollback()
-                retries += 1
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for creating surrounding characters. {traceback.print_exc()}')
-                    return {"message": "Failed to create surrounding characters. Retry limit exceeded.", "status": "failure"}
-                else:
-                    print(f'Error occurred while creating surrounding characters. Retrying... {traceback.print_exc()}')
-        return {"message": "Failed to create surrounding characters after multiple attempts.", "status": "failure"}
+        current_dt = self.character_data.get('current_date_time') if hasattr(self, 'character_data') else None
+        new_event = Event(
+            seed_id=self.seed_id,
+            name=npc.event.name,
+            description=npc.event.description,
+            start_date_time=current_dt - timedelta(hours=random.randint(1, 5)) if current_dt else None,
+            end_date_time=current_dt,
+            type=npc.event.type,
+            location_id=location['id'],
+            start_turn=1,
+            end_turn=1,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        self.session.add(new_event)
+        self.session.flush()
+
+        self.session.add(EventCharacter(
+            seed_id=self.seed_id,
+            character_id=new_character.id,
+            event_id=new_event.id,
+            role=npc.event.role,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        ))
+
+        for skill in npc.skills:
+            new_skill = Skill(name=skill.name, description=skill.description,
+                              created_at=datetime.now(), updated_at=datetime.now())
+            self.session.add(new_skill)
+            self.session.flush()
+            self.session.add(CharacterSkill(
+                seed_id=self.seed_id, character_id=new_character.id,
+                skill_id=new_skill.id,
+                level=random.randint(1, 5), exp_points=random.randint(0, 100),
+                created_at=datetime.now(), updated_at=datetime.now(),
+            ))
+
+        for st in npc.statuses:
+            new_status = Status(name=st.name, description=st.description, type=st.type,
+                                duration=st.duration, created_at=datetime.now(),
+                                updated_at=datetime.now())
+            self.session.add(new_status)
+            self.session.flush()
+            self.session.add(CharacterStatus(
+                seed_id=self.seed_id, character_id=new_character.id,
+                status_id=new_status.id, active=True,
+                end_date_time=datetime.now() + timedelta(seconds=st.duration or 0),
+                created_at=datetime.now(), updated_at=datetime.now(),
+            ))
+
+        for item in npc.items:
+            new_item = Item(name=item.name, description=item.description, type=item.type,
+                            value=item.value, weight=item.weight,
+                            created_at=datetime.now(), updated_at=datetime.now())
+            self.session.add(new_item)
+            self.session.flush()
+            self.session.add(CharacterItem(
+                seed_id=self.seed_id, character_id=new_character.id,
+                item_id=new_item.id, quantity=item.quantity, condition=item.condition,
+                created_at=datetime.now(), updated_at=datetime.now(),
+            ))
+
+        self.session.commit()
+        return {'id': new_character.id, 'name': npc_name,
+                'location_id': location['id']}
 
     def create_surrounding_characters_skills(self):
-        retries = 0
-        max_retries = 5
-        if not hasattr(self, 'NPCs_data') or not self.NPCs_data:
-            return {"message": "No surrounding characters data available.", "status": "failure"}
-
-        while retries <= max_retries:
-            try:
-                for npc in self.NPCs_data:
-                    skills_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_SKILLS'].format(npc, self.seed_data))
-                    skills_data = self.gpt_service.extract_json(skills_text, list_flag=True)
-
-                    if skills_data is None:
-                        print(f"No valid JSON data was extracted for skills of character {npc['name']}.")
-                        continue
-
-                    for skill in skills_data:
-                        new_skill = Skill(
-                            name=skill['name'],
-                            description=skill['description'],
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_skill)
-                        self.session.flush()  # Flush to get the skill_id before committing
-
-                        new_character_skill = CharacterSkill(
-                            seed_id=self.seed_id,
-                            character_id=npc['id'],  # Use the stored character ID from self.NPCs_data
-                            skill_id=new_skill.id,
-                            level=random.randint(1, 5),  # Example: Randomly assign a skill level
-                            exp_points=random.randint(0, 100),
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_character_skill)
-
-                        
-
-                    self.session.commit()
-                    print(f"Skills created successfully for character {npc['name']}")
-
-                    
-
-                return {"message": "Skills for all surrounding characters created successfully", "status": "success"}
-
-            except Exception as e:
-                self.session.rollback()
-                retries += 1
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for creating surrounding character skills. {traceback.print_exc()}')
-                    return {"message": "Failed to create surrounding character skills. Retry limit exceeded.", "status": "failure"}
-                else:
-                    print(f'Error occurred while creating surrounding character skills. Retrying... {traceback.print_exc()}')
-        
-        return {"message": "Failed to create surrounding character skills after multiple attempts.", "status": "failure"}
+        """No-op: skills are batched into create_surrounding_characters."""
+        return {"message": "Surrounding character skills batched.", "status": "success"}
 
     def create_surrounding_characters_statuses(self):
-        retries = 0
-        max_retries = 5
-        if not hasattr(self, 'NPCs_data') or not self.NPCs_data:
-            return {"message": "No surrounding characters data available.", "status": "failure"}
-
-        while retries <= max_retries:
-            try:
-                for npc in self.NPCs_data:
-                    statuses_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_STATUSES'].format(npc, self.seed_data))
-                    statuses_data = self.gpt_service.extract_json(statuses_text, list_flag=True)
-
-                    if statuses_data is None:
-                        print(f"No valid JSON data was extracted for statuses of character {npc['name']}.")
-                        continue
-
-                    for status in statuses_data:
-                        new_status = Status(
-                            name=status['name'],
-                            description=status['description'],
-                            type=status['type'],
-                            duration=status.get('duration', 0),  # Default duration to 0 if not specified
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_status)
-                        self.session.flush()  # Flush to get the status_id before committing
-
-                        new_character_status = CharacterStatus(
-                            seed_id=self.seed_id,
-                            character_id=npc['id'],  # Use the stored NPC ID from self.NPCs_data
-                            status_id=new_status.id,
-                            active=True,  # Assume the status is initially active
-                            end_date_time=datetime.now() + timedelta(hours=status.get('duration', 0)),  # Calculate end time if applicable
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_character_status)
-
-                        
-
-                    self.session.commit()
-                    print(f"Statuses created successfully for character {npc['name']}")
-
-                    
-
-                return {"message": "Statuses for all surrounding characters created successfully", "status": "success"}
-
-            except Exception as e:
-                self.session.rollback()
-                retries += 1
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for creating surrounding character statuses. {traceback.print_exc()}')
-                    return {"message": "Failed to create surrounding character statuses. Retry limit exceeded.", "status": "failure"}
-                else:
-                    print(f'Error occurred while creating surrounding character statuses. Retrying... {traceback.print_exc()}')
-
-        return {"message": "Failed to create surrounding character statuses after multiple attempts.", "status": "failure"}
-
-    def create_surrounding_characters_relationships(self):
-        retries = 0
-        max_retries = 5
-        if not hasattr(self, 'NPCs_data') or not self.NPCs_data:
-            return {"message": "No NPC data available to form relationships.", "status": "failure"}
-
-        while retries <= max_retries:
-            try:
-                num_pairs = min(len(self.NPCs_data), 10)  # Adjust based on your requirements
-
-                # Generate a list of unique pairs
-                random_pairs = random.sample([(i, j) for i in range(len(self.NPCs_data)) for j in range(i+1, len(self.NPCs_data))], num_pairs)
-
-                for (i, j) in random_pairs:
-                    character = self.NPCs_data[i]
-                    related_character = self.NPCs_data[j]
-
-                    relationship_prompt = WORLD_BUILDING['CHARACTER_RELATIONSHIP'].format(character, related_character, self.seed_data)
-                    relationship_text = self.gpt_service.get_response(relationship_prompt)
-                    relationship_data = self.gpt_service.extract_json(relationship_text, list_flag=False, nested_key='relationship')
-
-                    if not relationship_data:
-                        continue  # If no data extracted, skip to next pair
-
-                    new_relationship = CharacterRelationship(
-                        seed_id=self.seed_id,
-                        character_id=character['id'],
-                        related_character_id=related_character['id'],
-                        relationship_type=relationship_data['type'],
-                        attraction=relationship_data.get('attraction', 5),
-                        respect=relationship_data.get('respect', 5),
-                        trust=relationship_data.get('trust', 5),
-                        familiarity=relationship_data.get('familiarity', 0),
-                        anger=relationship_data.get('anger', 5),
-                        fear=relationship_data.get('fear', 5),
-                        created_at=datetime.now(),
-                        updated_at=datetime.now()
-                    )
-                    self.session.add(new_relationship)
-
-                self.session.commit()
-                return {"message": "Random NPC relationships established successfully", "status": "success"}
-
-            except Exception as e:
-                self.session.rollback()
-                retries += 1
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for establishing random NPC relationships. {traceback.print_exc()}')
-                    return {"message": "Failed to establish random NPC relationships. Retry limit exceeded.", "status": "failure"}
-                else:
-                    print(f'Error occurred while establishing random NPC relationships. Retrying... {traceback.print_exc()}')
-
-        return {"message": "Failed to establish random NPC relationships after multiple attempts.", "status": "failure"}
+        """No-op: statuses are batched into create_surrounding_characters."""
+        return {"message": "Surrounding character statuses batched.", "status": "success"}
 
     def create_surrounding_characters_items(self):
-        retries = 0
-        max_retries = 5
-        if not hasattr(self, 'NPCs_data') or not self.NPCs_data:
-            return {"message": "No NPC data available to assign items.", "status": "failure"}
+        """No-op: items are batched into create_surrounding_characters."""
+        return {"message": "Surrounding character items batched.", "status": "success"}
 
-        while retries <= max_retries:
+    # ------------------------------------------------------------------ #
+    # Relationships (parallelized across pairs)                           #
+    # ------------------------------------------------------------------ #
+    def create_surrounding_characters_relationships(self):
+        if not getattr(self, 'NPCs_data', None) or len(self.NPCs_data) < 2:
+            return {"message": "No NPC data available to form relationships.",
+                    "status": "success"}
+
+        all_pairs = [(i, j) for i in range(len(self.NPCs_data))
+                     for j in range(i + 1, len(self.NPCs_data))]
+        num_pairs = min(len(all_pairs), 10)
+        random_pairs = random.sample(all_pairs, num_pairs)
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=self._MAX_WORKERS) as pool:
+            futures = {pool.submit(self._fetch_relationship,
+                                   self.NPCs_data[i], self.NPCs_data[j]): (i, j)
+                       for (i, j) in random_pairs}
+            for future in as_completed(futures):
+                pair = futures[future]
+                try:
+                    results[pair] = future.result()
+                except Exception as e:
+                    print(f"Relationship fetch failed for pair {pair}: {e}")
+                    results[pair] = None
+
+        persisted = 0
+        for (i, j), rel in results.items():
+            if rel is None:
+                continue
             try:
-                for npc in self.NPCs_data:
-                    # Generate items for each NPC
-                    items_text = self.gpt_service.get_response(WORLD_BUILDING['CHARACTER_ITEMS'].format(npc, self.seed_data))
-                    items_data = self.gpt_service.extract_json(items_text, list_flag=True)
-
-                    if items_data is None:
-                        print(f"No valid JSON data was extracted for items of character {npc['name']}.")
-                        continue
-
-                    for item_data in items_data:
-                        new_item = Item(
-                            name=item_data['name'],
-                            description=item_data['description'],
-                            type=item_data['type'],
-                            value=item_data.get('value', 0.0),
-                            weight=item_data.get('weight', 0.0),
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_item)
-                        self.session.flush()  # Flush to get the item_id before committing
-
-                        new_character_item = CharacterItem(
-                            seed_id=self.seed_id,
-                            character_id=npc['id'],  # Use the stored NPC ID from self.NPCs_data
-                            item_id=new_item.id,
-                            quantity=item_data.get('quantity', 1),
-                            condition=item_data.get('condition', 100.0),  # Default condition to 100%
-                            created_at=datetime.now(),
-                            updated_at=datetime.now()
-                        )
-                        self.session.add(new_character_item)
-
-                    self.session.commit()
-                    print(f"Items assigned successfully to character {npc['name']}")
-
-                return {"message": "Items for all surrounding characters created successfully", "status": "success"}
-
+                self.session.add(CharacterRelationship(
+                    seed_id=self.seed_id,
+                    character_id=self.NPCs_data[i]['id'],
+                    related_character_id=self.NPCs_data[j]['id'],
+                    relationship_type=rel.type,
+                    attraction=rel.attraction, respect=rel.respect, trust=rel.trust,
+                    familiarity=rel.familiarity, anger=rel.anger, fear=rel.fear,
+                    created_at=datetime.now(), updated_at=datetime.now(),
+                ))
+                persisted += 1
             except Exception as e:
                 self.session.rollback()
-                retries += 1
-                if retries > max_retries:
-                    print(f'Exceeded max try limit for assigning items to NPCs. {traceback.print_exc()}')
-                    return {"message": "Failed to assign items to NPCs. Retry limit exceeded.", "status": "failure"}
-                else:
-                    print(f'Error occurred while assigning items to NPCs. Retrying... {traceback.print_exc()}')
+                print(f"Failed to persist relationship for pair ({i},{j}): {e}")
 
-        return {"message": "Failed to assign items to NPCs after multiple attempts.", "status": "failure"}
+        try:
+            self.session.commit()
+        except Exception as e:
+            self.session.rollback()
+            traceback.print_exc()
+            return {"message": f"Failed to commit NPC relationships. {e}",
+                    "status": "failure"}
+
+        return {"message": f"NPC relationships established ({persisted}).",
+                "status": "success"}
+
+    def _fetch_relationship(self, character, related_character):
+        return self.gpt_service.get_structured(
+            WORLD_BUILDING['RELATIONSHIP_BATCH'].format(
+                character, related_character, self.seed_data),
+            RelationshipOut,
+            max_attempts=2,
+            temperature=0.7,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Main-character acquaintances                                        #
+    # ------------------------------------------------------------------ #
+    def create_main_character_relationships(self):
+        """Seed a small set of MC <-> NPC acquaintances at world-start.
+
+        Picks 1-3 NPCs weighted toward the protagonist's starting location so
+        the MC begins the game knowing only a handful of locals rather than
+        the entire populated world. NPCs with no row keyed off the MC are
+        treated as strangers (familiarity == 0) by the read path.
+        """
+        if not getattr(self, 'NPCs_data', None):
+            return {"message": "No NPCs available; no MC relationships to form.",
+                    "status": "success"}
+
+        mc_payload = getattr(self, 'character_data', None) or {}
+        mc_id = mc_payload.get('id')
+        if not mc_id:
+            return {"message": "Main character not created; skipping MC relationships.",
+                    "status": "skipped"}
+
+        indices = self._pick_mc_acquaintance_indices()
+        if not indices:
+            return {"message": "No MC acquaintances selected.", "status": "success"}
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=self._MAX_WORKERS) as pool:
+            futures = {pool.submit(self._fetch_relationship,
+                                   mc_payload, self.NPCs_data[i]): i
+                       for i in indices}
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    print(f"MC relationship fetch failed for NPC index {idx}: {e}")
+                    results[idx] = None
+
+        persisted = 0
+        for idx, rel in results.items():
+            if rel is None:
+                continue
+            # Clamp familiarity so a seeded MC acquaintance is never read back
+            # as an "unknown" stranger (familiarity == 0 is reserved for that).
+            familiarity = max(rel.familiarity or 0, 1)
+            try:
+                self.session.add(CharacterRelationship(
+                    seed_id=self.seed_id,
+                    character_id=mc_id,
+                    related_character_id=self.NPCs_data[idx]['id'],
+                    relationship_type=rel.type,
+                    attraction=rel.attraction, respect=rel.respect, trust=rel.trust,
+                    familiarity=familiarity, anger=rel.anger, fear=rel.fear,
+                    created_at=datetime.now(), updated_at=datetime.now(),
+                ))
+                persisted += 1
+            except Exception as e:
+                self.session.rollback()
+                print(f"Failed to persist MC relationship for NPC index {idx}: {e}")
+
+        try:
+            self.session.commit()
+        except Exception as e:
+            self.session.rollback()
+            traceback.print_exc()
+            return {"message": f"Failed to commit MC relationships. {e}",
+                    "status": "failure"}
+
+        return {"message": f"Main-character relationships established ({persisted}).",
+                "status": "success"}
+
+    def _pick_mc_acquaintance_indices(self):
+        """Choose up to three NPCs the MC starts the game knowing.
+
+        Prefers NPCs at the protagonist's starting location (locations[0],
+        matching the ordering used by the intro narration), then optionally
+        adds one "old contact" drawn from anywhere else at low probability.
+        """
+        locations = list(getattr(self, 'locations', []) or [])
+        starting_loc_id = locations[0]['id'] if locations else None
+
+        local_indices = [i for i, npc in enumerate(self.NPCs_data)
+                         if npc.get('location_id') == starting_loc_id]
+        other_indices = [i for i, npc in enumerate(self.NPCs_data)
+                         if npc.get('location_id') != starting_loc_id]
+
+        target = min(len(local_indices), random.randint(1, 3))
+        chosen = random.sample(local_indices, target) if target else []
+
+        if other_indices and random.random() < 0.25:
+            chosen.append(random.choice(other_indices))
+
+        return chosen
+

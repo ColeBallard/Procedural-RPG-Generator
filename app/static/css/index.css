@@ -73,9 +73,13 @@ h3 {
 }
 
 .title {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: var(--bg-card);
     border-bottom: 2px solid var(--primary-color);
-    padding-bottom: 0.5rem;
-    margin-bottom: 1rem;
+    margin: 0 -1.25rem 1rem;
+    padding: 1.25rem 1.25rem 0.5rem;
 }
 
 /* ===== UTILITY CLASSES ===== */
@@ -88,6 +92,10 @@ h3 {
     margin: 0.5rem 0;
     font-weight: 500;
     animation: shake 0.3s ease-in-out;
+}
+
+.error:empty {
+    display: none;
 }
 
 @keyframes shake {
@@ -295,7 +303,7 @@ button:disabled, .btn:disabled {
     overflow-y: auto;
     background-color: var(--bg-card);
     border: 1px solid var(--border-color);
-    padding: 1.25rem;
+    padding: 0 1.25rem 1.25rem;
     border-radius: 0.75rem;
     box-shadow: var(--shadow-lg);
     transition: all var(--transition-normal);
@@ -423,6 +431,43 @@ button:disabled, .btn:disabled {
     border-left-width: 5px;
     transform: translateX(5px);
     box-shadow: var(--shadow-md);
+}
+
+#narrativeList .narrative-speaker {
+    margin-right: 0.35rem;
+}
+
+#narrativeList .narrative-player_input {
+    font-style: italic;
+    text-align: right;
+    border-left: none;
+    border-right: 3px solid var(--primary-color);
+}
+
+#narrativeList .narrative-system,
+#narrativeList .narrative-world_building {
+    opacity: 0.85;
+}
+
+#narrativeList .narrative-combat {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+}
+
+#narrativeList .narrative-dialogue .narrative-speaker {
+    color: var(--primary-color);
+}
+
+#narrativeList .narrative-narration {
+    white-space: pre-wrap;
+    line-height: 1.55;
+    font-size: 1.02em;
+}
+
+#narrativeList .narrative-narration .narrative-speaker {
+    font-variant: small-caps;
+    letter-spacing: 0.05em;
+    color: var(--primary-color);
 }
 
 #optionsList {
@@ -752,7 +797,13 @@ button:disabled, .btn:disabled {
 
 /* ===== GAME VIEW LAYOUT ===== */
 #game-view .row {
-    gap: 1rem;
+    margin-left: -0.75rem;
+    margin-right: -0.75rem;
+}
+
+#game-view .row > * {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
 }
 
 #game-view .col-md-3,
@@ -1716,5 +1767,15 @@ textarea {
     padding: 0.75rem;
     border-radius: 4px;
     text-align: center;
+    font-weight: 600;
+}
+
+/* ===== INTERACTING CHARACTERS: ACQUAINTANCE LEVELS ===== */
+.accordion-item.character-unknown .accordion-button {
+    opacity: 0.55;
+    font-style: italic;
+}
+
+.accordion-item.character-close .accordion-button {
     font-weight: 600;
 }

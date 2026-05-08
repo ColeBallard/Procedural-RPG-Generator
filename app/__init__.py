@@ -1,17 +1,52 @@
 import os
+import secrets
 import yaml
 import json
 import logging
 
 from dotenv import load_dotenv
 
-from flask import Flask, current_app
+from flask import Flask, abort, current_app, request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from openai import OpenAI
 
 from .orm import Base, Settings
+from .startup import run_startup_tasks
 from .world_building.world_building import WorldBuilder
+
+# Double-submit-cookie CSRF: a non-HttpOnly cookie holds a per-browser token
+# that the frontend echoes back in the X-CSRF-Token header on state-changing
+# requests. Same-origin only, so SameSite=Lax cookies prevent cross-site
+# attackers from reading the cookie and forging the header.
+CSRF_COOKIE_NAME = 'csrf_token'
+CSRF_HEADER_NAME = 'X-CSRF-Token'
+_CSRF_SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
+
+
+def _csrf_protect():
+    if not current_app.config.get('CSRF_ENABLED'):
+        return
+    if request.method in _CSRF_SAFE_METHODS:
+        return
+    cookie = request.cookies.get(CSRF_COOKIE_NAME)
+    header = request.headers.get(CSRF_HEADER_NAME)
+    if not cookie or not header or not secrets.compare_digest(cookie, header):
+        abort(403, description='CSRF token missing or invalid')
+
+
+def _csrf_set_cookie(response):
+    if not current_app.config.get('CSRF_ENABLED'):
+        return response
+    if not request.cookies.get(CSRF_COOKIE_NAME):
+        response.set_cookie(
+            CSRF_COOKIE_NAME, secrets.token_urlsafe(32),
+            samesite='Lax',
+            secure=current_app.config.get('SESSION_COOKIE_SECURE', False),
+            httponly=False,
+        )
+    return response
+
 
 def createApp():
     app = Flask(__name__, static_folder='static', static_url_path='/static', template_folder='templates')
@@ -19,8 +54,40 @@ def createApp():
     # Load environment variables
     load_dotenv()
 
-    # Configure session
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+    # Session signing key. Refuse to fall back to a hard-coded default so a
+    # missing SECRET_KEY in production cannot be exploited to forge session
+    # cookies. In non-production we generate an ephemeral random key and
+    # warn loudly; sessions will be invalidated on every restart until the
+    # operator sets SECRET_KEY in the .env.
+    secret_key = os.getenv('SECRET_KEY')
+    if not secret_key:
+        if (os.getenv('FLASK_ENV') or '').lower() == 'production':
+            raise RuntimeError(
+                "SECRET_KEY environment variable is required in production"
+            )
+        secret_key = secrets.token_hex(32)
+        logging.warning(
+            "SECRET_KEY not set; using an ephemeral random key. "
+            "Sessions will be invalidated on every restart. Set SECRET_KEY in your .env."
+        )
+    app.config['SECRET_KEY'] = secret_key
+
+    # Cookie hardening. Secure flag is opt-in via env so local HTTP dev
+    # still works; production deployments behind TLS should set
+    # SESSION_COOKIE_SECURE=1.
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['SESSION_COOKIE_SECURE'] = (
+        os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
+    )
+
+    # Toggle CSRF and login-required gates. Both default to on for the real
+    # app; tests construct their own Flask app without these flags so they
+    # bypass the gates.
+    app.config['CSRF_ENABLED'] = True
+    app.config['LOGIN_REQUIRED'] = True
+    app.before_request(_csrf_protect)
+    app.after_request(_csrf_set_cookie)
 
     # Database configuration
     db_config = {
@@ -58,6 +125,11 @@ def createApp():
     # Store the session factory in the app config
     app.config['SESSION_FACTORY'] = Session
 
+    # Apply idempotent column adds and (optionally) background-seed
+    # NameLibrary if empty. Both steps are gated by env vars and never
+    # block app startup.
+    run_startup_tasks(engine, Session)
+
     # Load settings from database (or migrate from YAML if needed)
     session = Session()
     try:
@@ -72,8 +144,8 @@ def createApp():
                     config_data = yaml.safe_load(config_file)
 
                 settings_record = Settings(
-                    min_grok=config_data.get('min_grok', 'grok-2-1212'),
-                    max_grok=config_data.get('max_grok', 'grok-2-1212'),
+                    min_grok=config_data.get('min_grok', 'grok-4-1-fast-non-reasoning'),
+                    max_grok=config_data.get('max_grok', 'grok-4.3'),
                     emotional_attributes=json.dumps(config_data.get('emotional_attributes', {})),
                     classes=json.dumps(config_data.get('classes', []))
                 )
@@ -84,8 +156,8 @@ def createApp():
                 # Create default settings
                 logging.info("Creating default settings...")
                 settings_record = Settings(
-                    min_grok='grok-2-1212',
-                    max_grok='grok-2-1212',
+                    min_grok='grok-4-1-fast-non-reasoning',
+                    max_grok='grok-4.3',
                     emotional_attributes=json.dumps({}),
                     classes=json.dumps([])
                 )
@@ -102,8 +174,8 @@ def createApp():
     except Exception as e:
         logging.error(f"Error loading settings: {e}")
         # Fallback to defaults
-        app.config['min_grok'] = 'grok-2-1212'
-        app.config['max_grok'] = 'grok-2-1212'
+        app.config['min_grok'] = 'grok-4-1-fast-non-reasoning'
+        app.config['max_grok'] = 'grok-4.3'
         app.config['emotional_attributes'] = {}
         app.config['classes'] = []
     finally:

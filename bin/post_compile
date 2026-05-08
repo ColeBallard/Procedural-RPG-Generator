@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Heroku Python buildpack hook: runs once per build, after
+# `pip install -r requirements.txt`. Anything installed here lands in the
+# slug and is available to web/release dynos.
+#
+# We use this hook for fantasynames because its install_requires pins
+# dev tooling (mypy<0.813 -> typed-ast) that fails to build on modern
+# Python. The --no-deps flag skips that broken transitive chain.
+
+set -e
+
+echo "-----> Installing fantasynames (--no-deps to skip broken dev pins)"
+pip install --no-deps fantasynames==0.1.2
+
+echo "-----> post_compile complete"
