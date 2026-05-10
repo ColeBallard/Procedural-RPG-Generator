@@ -10,7 +10,7 @@ from app.orm import (
 )
 from app.prompt_templates import WORLD_BUILDING
 from app.world_building.schemas import (
-    MainCharacterOut, NPCListOut, RelationshipOut,
+    MainCharacterOut, MainCharacterItemsOut, NPCListOut, RelationshipOut,
 )
 
 
@@ -152,6 +152,60 @@ class CharacterBuilder:
         """No-op: statuses are batched into create_main_character."""
         count = len(self.character_data.get('statuses', [])) if hasattr(self, 'character_data') else 0
         return {"message": f"Main character statuses batched ({count}).", "status": "success"}
+
+    def create_main_character_items(self):
+        """Give the protagonist a small starter inventory via one LLM call.
+
+        The prompt constrains the LLM to 2-4 mundane, low-power items with
+        capped value/weight so a fresh run never opens with overpowered gear.
+        Failures here are non-fatal: the MC simply starts empty-handed.
+        """
+        mc_payload = getattr(self, 'character_data', None) or {}
+        mc_id = mc_payload.get('id')
+        if not mc_id:
+            return {"message": "Main character not created; skipping starter items.",
+                    "status": "skipped"}
+
+        payload = self.gpt_service.get_structured(
+            WORLD_BUILDING['MAIN_CHARACTER_ITEMS_BATCH'].format(
+                character=mc_payload, seed_data=self.seed_data),
+            MainCharacterItemsOut,
+            max_attempts=2,
+            temperature=0.9,
+        )
+        if payload is None or not payload.items:
+            return {"message": "No starter items generated.", "status": "success"}
+
+        persisted = 0
+        for item in payload.items:
+            try:
+                new_item = Item(name=item.name, description=item.description,
+                                type=item.type, value=item.value, weight=item.weight,
+                                created_at=datetime.now(), updated_at=datetime.now())
+                self.session.add(new_item)
+                self.session.flush()
+                self.session.add(CharacterItem(
+                    seed_id=self.seed_id, character_id=mc_id,
+                    item_id=new_item.id, quantity=item.quantity,
+                    condition=item.condition,
+                    created_at=datetime.now(), updated_at=datetime.now(),
+                ))
+                persisted += 1
+            except Exception as e:
+                self.session.rollback()
+                print(f"Failed to persist starter item '{getattr(item, 'name', '?')}': {e}")
+
+        try:
+            self.session.commit()
+        except Exception as e:
+            self.session.rollback()
+            traceback.print_exc()
+            return {"message": f"Failed to commit starter items. {e}",
+                    "status": "failure"}
+
+        self.character_data['items'] = [i.model_dump() for i in payload.items]
+        return {"message": f"Main character starter items created ({persisted}).",
+                "status": "success"}
 
     # ------------------------------------------------------------------ #
     # Surrounding characters (NPCs)                                       #

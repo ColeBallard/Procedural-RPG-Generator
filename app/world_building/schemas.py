@@ -108,6 +108,11 @@ class MainCharacterOut(_CharacterCoreMixin):
         return _parse_datetime(v)
 
 
+class MainCharacterItemsOut(BaseModel):
+    """Starter inventory payload: a small list of low-power items."""
+    items: List[ItemOut] = Field(default_factory=list)
+
+
 class NPCOut(_CharacterCoreMixin):
     """Batched NPC payload: core + event + skills + statuses + items."""
     event: EventOut = Field(default_factory=lambda: EventOut(name="Daily life"))

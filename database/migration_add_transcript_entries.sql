@@ -2,8 +2,8 @@
 -- Run this if you have an existing database without transcript-log support.
 
 CREATE TABLE IF NOT EXISTS `TranscriptEntries` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `seed_id` int NOT NULL,
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `seed_id` int unsigned NOT NULL,
   `turn` int DEFAULT NULL,
   `kind` varchar(32) NOT NULL,
   `speaker` varchar(64) DEFAULT NULL,

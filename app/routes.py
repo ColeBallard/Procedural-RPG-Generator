@@ -18,8 +18,14 @@ from app.orm import (
     CharacterRelationship,
 )
 from app.services import transcript_service
+from app.services.gpt_service import GPTService
 from app.world_building.world_building import WorldBuilder
-from app.prompt_templates import STEREOTYPE_ANALYSIS
+from app.prompt_templates import STEREOTYPE_ANALYSIS, WORLD_BUILDING
+
+# Cap on how many trailing transcript entries are folded into the per-turn
+# context. Keeps prompts bounded as the game grows; the world-building
+# progress lines are filtered out to spend the budget on actual story beats.
+TURN_TRANSCRIPT_HISTORY = 30
 
 main = Blueprint('main', __name__)
 world_builder = None
@@ -41,6 +47,42 @@ def login_required(f):
         return f(*args, **kwargs)
     return wrapped
 
+
+def _is_valid_grok_key(key):
+    return bool(key) and key.startswith('xai-') and len(key) > 4
+
+
+def _extract_grok_api_key():
+    # Header-first lookup keeps a single client-side setup point (see
+    # ajaxSetup in main.js) for both GET and POST. Falls back to the JSON
+    # body for existing POST routes that already inline the key.
+    key = request.headers.get('X-Grok-API-Key')
+    if key:
+        return key.strip()
+    if request.is_json:
+        body = request.get_json(silent=True) or {}
+        return (body.get('grok_api_key') or '').strip()
+    return ''
+
+
+def grok_api_key_required(f):
+    """Reject callers without a format-valid xAI key when the gate is on.
+
+    Mirrors ``login_required``: tests omit the flag so they bypass it,
+    while ``createApp`` flips ``GROK_API_KEY_REQUIRED`` on in the real app.
+    """
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        if current_app.config.get('GROK_API_KEY_REQUIRED'):
+            key = _extract_grok_api_key()
+            if not _is_valid_grok_key(key):
+                return jsonify({
+                    'success': False,
+                    'message': 'A valid xAI API key is required.'
+                }), 403
+        return f(*args, **kwargs)
+    return wrapped
+
 @main.route('/', methods=['GET', 'POST'])
 def index():
     return render_template('index.html')
@@ -48,12 +90,6 @@ def index():
 @main.route('/templates/<path:filename>')
 def serve_template(filename):
     return send_from_directory('templates', filename)
-
-@main.route('/get_config')
-@login_required
-def get_config():
-    serializable_config = make_serializable(current_app.config)
-    return jsonify(serializable_config)
 
 @main.route('/create_seed', methods=['POST'])
 @login_required
@@ -80,6 +116,7 @@ def create_seed():
 
 @main.route('/initialize_world_building', methods=['POST'])
 @login_required
+@grok_api_key_required
 def initialize_world_building():
     data = request.json
     seed_id = data.get('seed_id')
@@ -108,6 +145,7 @@ def initialize_world_building():
 
 @main.route('/initialize_world_building_stream', methods=['POST'])
 @login_required
+@grok_api_key_required
 def initialize_world_building_stream():
     data = request.json
     seed_id = data.get('seed_id')
@@ -211,26 +249,22 @@ def get_settings():
         if not settings_record:
             # Create default settings from current config
             emotional_attrs = current_app.config.get('emotional_attributes', {})
-            classes = current_app.config.get('classes', [])
 
             settings_record = Settings(
                 min_grok=current_app.config.get('min_grok', 'grok-4-1-fast-non-reasoning'),
                 max_grok=current_app.config.get('max_grok', 'grok-4.3'),
                 emotional_attributes=json.dumps(emotional_attrs),
-                classes=json.dumps(classes)
             )
             session.add(settings_record)
             session.commit()
 
         # Parse JSON fields
         emotional_attrs = json.loads(settings_record.emotional_attributes) if settings_record.emotional_attributes else {}
-        classes = json.loads(settings_record.classes) if settings_record.classes else []
 
         settings = {
             'min_grok': settings_record.min_grok,
             'max_grok': settings_record.max_grok,
             'emotional_attributes': emotional_attrs,
-            'classes': classes
         }
 
         session.close()
@@ -258,7 +292,6 @@ def save_settings():
         settings_record.min_grok = data.get('min_grok', 'grok-4-1-fast-non-reasoning')
         settings_record.max_grok = data.get('max_grok', 'grok-4.3')
         settings_record.emotional_attributes = json.dumps(data.get('emotional_attributes', {}))
-        settings_record.classes = json.dumps(data.get('classes', []))
         settings_record.updated_at = datetime.datetime.now()
 
         session.commit()
@@ -267,7 +300,6 @@ def save_settings():
         current_app.config['min_grok'] = settings_record.min_grok
         current_app.config['max_grok'] = settings_record.max_grok
         current_app.config['emotional_attributes'] = json.loads(settings_record.emotional_attributes)
-        current_app.config['classes'] = json.loads(settings_record.classes)
 
         session.close()
         return jsonify({'status': 'success', 'message': 'Settings saved successfully'})
@@ -305,6 +337,7 @@ def list_seeds():
 
 @main.route('/api/world/<int:seed_id>', methods=['GET'])
 @login_required
+@grok_api_key_required
 def get_world(seed_id):
     """Return all world data for a given seed: locations, events, NPCs,
     main character (with stats, items, skills, statuses, relationships) and quests."""
@@ -352,6 +385,7 @@ def get_world(seed_id):
         # building the relationships payload below.
         mc_relationship_rows = []
         familiarity_by_npc = {}
+        relationship_by_npc = {}
         if main_character:
             mc_relationship_rows = (
                 db_session.query(CharacterRelationship)
@@ -362,9 +396,12 @@ def get_world(seed_id):
                 rel.related_character_id: (rel.familiarity or 0)
                 for rel in mc_relationship_rows
             }
+            relationship_by_npc = {
+                rel.related_character_id: rel for rel in mc_relationship_rows
+            }
 
         npcs = [
-            _npc_payload(c, familiarity_by_npc.get(c.id, 0))
+            _npc_payload(c, familiarity_by_npc.get(c.id, 0), relationship_by_npc.get(c.id))
             for c in db_session.query(Character)
             .filter(Character.seed_id == seed_id, Character.main_character == False)
             .all()
@@ -472,6 +509,206 @@ def get_world(seed_id):
         db_session.close()
 
 
+def _build_turn_context(db_session, seed_id):
+    """Collect the per-turn payload sent to the LLM.
+
+    Returns a dict with the seed data, main character, starting + nearby
+    locations and the recent transcript history (story beats only). Returns
+    ``None`` when the seed has no main character or no locations yet, which
+    indicates world-building hasn't finished.
+    """
+    main_character = (
+        db_session.query(Character)
+        .filter(Character.seed_id == seed_id, Character.main_character == True)
+        .first()
+    )
+    if not main_character:
+        return None
+
+    locations = (
+        db_session.query(Location)
+        .filter(Location.seed_id == seed_id, Location.parent_id.is_(None))
+        .all()
+    )
+    if not locations:
+        return None
+
+    character_payload = {
+        'name': main_character.name,
+        'race': main_character.race,
+        'level': main_character.level,
+        'current_health': main_character.current_health,
+        'max_health': main_character.max_health,
+    }
+
+    def _loc(loc):
+        return {
+            'name': loc.name,
+            'description': loc.description or '',
+            'type': loc.type,
+            'climate': loc.climate,
+            'terrain': loc.terrain,
+        }
+
+    starting_location = _loc(locations[0])
+    other_locations = [_loc(l) for l in locations[1:]]
+
+    # Pull the trailing transcript and drop world-building progress lines so
+    # the prompt focuses on the actual story beats the player has seen.
+    full_transcript = transcript_service.list_for_seed(db_session, seed_id)
+    story_kinds = {
+        transcript_service.KIND_NARRATION,
+        transcript_service.KIND_PLAYER_INPUT,
+        transcript_service.KIND_DIALOGUE,
+        transcript_service.KIND_COMBAT,
+        transcript_service.KIND_QUEST,
+    }
+    recent = [e for e in full_transcript if e['kind'] in story_kinds][-TURN_TRANSCRIPT_HISTORY:]
+    transcript_lines = []
+    for entry in recent:
+        prefix = entry['speaker'] or entry['kind']
+        transcript_lines.append(f"[{prefix}] {entry['text']}")
+    transcript_text = '\n'.join(transcript_lines) if transcript_lines else '(no prior beats)'
+
+    return {
+        'seed_data': '',  # filled in by callers from request body when relevant
+        'character': character_payload,
+        'starting_location': starting_location,
+        'other_locations': other_locations,
+        'transcript': transcript_text,
+    }
+
+
+def _make_gpt_service():
+    """Build a GPTService bound to the per-request Grok API key."""
+    api_key = _extract_grok_api_key()
+    client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    return GPTService(client, current_app.config['min_grok'])
+
+
+def _generate_suggestions(gpt_service, context):
+    """Ask the LLM for 4 short action suggestions; tolerate failure.
+
+    Returns a list of suggestion strings (possibly empty). Suggestions are a
+    UX nicety: callers should never abort a turn because this fails.
+    """
+    try:
+        prompt = WORLD_BUILDING['SUGGEST_ACTIONS'].format(**context)
+        text = gpt_service.get_response(prompt, json_mode=True, temperature=0.9)
+        data = GPTService._parse_json_payload(text) or {}
+        raw = data.get('suggestions') or []
+        return [str(s).strip() for s in raw if str(s).strip()][:4]
+    except Exception as e:
+        print(f'Suggestion generation failed: {e}')
+        return []
+
+
+@main.route('/api/seed/<int:seed_id>/suggestions', methods=['GET'])
+@login_required
+@grok_api_key_required
+def get_suggestions(seed_id):
+    """Return short action suggestions for the player's current situation."""
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+    try:
+        context = _build_turn_context(db_session, seed_id)
+        if context is None:
+            return jsonify({'suggestions': []}), 200
+        gpt_service = _make_gpt_service()
+        suggestions = _generate_suggestions(gpt_service, context)
+        return jsonify({'suggestions': suggestions}), 200
+    except Exception as e:
+        return jsonify({'suggestions': [], 'error': str(e)}), 200
+    finally:
+        db_session.close()
+
+
+@main.route('/api/seed/<int:seed_id>/turn', methods=['POST'])
+@login_required
+@grok_api_key_required
+def submit_turn(seed_id):
+    """Accept a player action, persist it, and return the narrator's reply.
+
+    Persists the player's input as a ``player_input`` transcript entry, asks
+    the LLM for a short continuation as the narrator, persists that as a
+    ``narration`` entry, and returns both alongside a fresh batch of
+    suggestions for the next turn.
+    """
+    data = request.json or {}
+    action = (data.get('action') or '').strip()
+    seed_data = data.get('seed_data') or ''
+
+    if not action:
+        return jsonify({'success': False, 'message': 'Action is required.'}), 400
+
+    Session = current_app.config['SESSION_FACTORY']
+    session_factory = Session
+    db_session = Session()
+
+    try:
+        seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+        if not seed:
+            return jsonify({'success': False, 'message': 'Seed not found.'}), 404
+
+        turn = seed.current_turn or 1
+
+        # Persist the player's input first so it shows up in the transcript
+        # even if the LLM call below fails.
+        transcript_service.add_entry(
+            session_factory, seed_id,
+            transcript_service.KIND_PLAYER_INPUT, action,
+            turn=turn, speaker='You',
+        )
+
+        context = _build_turn_context(db_session, seed_id)
+        if context is None:
+            return jsonify({
+                'success': False,
+                'message': 'World is not ready yet; finish world building first.'
+            }), 409
+        context['seed_data'] = seed_data
+        context['player_action'] = action
+
+        gpt_service = _make_gpt_service()
+        narration_prompt = WORLD_BUILDING['CONTINUE_NARRATIVE'].format(**context)
+        try:
+            narration = gpt_service.get_response(narration_prompt, temperature=1.0)
+            narration = (narration or '').strip()
+        except Exception as e:
+            return jsonify({'success': False, 'message': f'Narration failed: {e}'}), 502
+
+        if narration:
+            transcript_service.add_entry(
+                session_factory, seed_id,
+                transcript_service.KIND_NARRATION, narration,
+                turn=turn, speaker='Narrator',
+            )
+
+        # Bump the turn counter only after a successful narration so failed
+        # turns can be retried without skipping ahead.
+        seed.current_turn = turn + 1
+        seed.updated_at = datetime.datetime.now()
+        db_session.commit()
+
+        # Refresh suggestions against the now-updated transcript so the next
+        # batch reflects what just happened. Failure here is non-fatal.
+        refreshed_context = _build_turn_context(db_session, seed_id) or context
+        refreshed_context['seed_data'] = seed_data
+        suggestions = _generate_suggestions(gpt_service, refreshed_context)
+
+        return jsonify({
+            'success': True,
+            'narration': narration,
+            'suggestions': suggestions,
+            'turn': seed.current_turn,
+        }), 200
+    except Exception as e:
+        db_session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+    finally:
+        db_session.close()
+
+
 def _character_description(c, acquaintance_level='close'):
     # Unknown NPCs only expose that they are deceased (visible at a glance);
     # race and level read like privileged knowledge the MC shouldn't have
@@ -513,9 +750,23 @@ _ACQUAINTANCE_ICONS = {
 }
 
 
-def _npc_payload(c, familiarity):
+def _npc_payload(c, familiarity, relationship=None):
     level = _acquaintance_level(familiarity)
     display_name = 'Stranger' if level == 'unknown' else c.name
+    # Strangers haven't been "met" from the MC's POV, so suppress the
+    # emotional readout even when a CharacterRelationship row exists.
+    relationship_payload = None
+    if relationship is not None and level != 'unknown':
+        relationship_payload = {
+            'relationship_type': relationship.relationship_type,
+            'attraction': relationship.attraction,
+            'respect': relationship.respect,
+            'trust': relationship.trust,
+            'familiarity': relationship.familiarity,
+            'anger': relationship.anger,
+            'fear': relationship.fear,
+            'description': _relationship_description(relationship),
+        }
     return {
         'id': c.id,
         'name': c.name,
@@ -527,6 +778,7 @@ def _npc_payload(c, familiarity):
         'alive': c.alive,
         'familiarity': familiarity,
         'acquaintance_level': level,
+        'relationship': relationship_payload,
     }
 
 
@@ -657,6 +909,7 @@ def login():
     data = request.json
     username = data.get('username')
     password = data.get('password')
+    remember = bool(data.get('remember'))
 
     if not username or not password:
         return jsonify({'success': False, 'message': 'Username and password are required'}), 400
@@ -670,9 +923,12 @@ def login():
         if not user or not check_password_hash(user.password_hash, password):
             return jsonify({'success': False, 'message': 'Invalid username or password'}), 401
 
-        # Set session
+        # Set session. When the caller opted in to "Stay signed in", mark the
+        # session permanent so it survives browser restarts up to
+        # PERMANENT_SESSION_LIFETIME instead of expiring with the browser.
         session['user_id'] = user.id
         session['username'] = user.username
+        session.permanent = remember
 
         return jsonify({'success': True, 'message': 'Login successful', 'username': username}), 200
     except Exception as e:
@@ -693,6 +949,7 @@ def check_auth():
 
 @main.route('/analyze_stereotype', methods=['POST'])
 @login_required
+@grok_api_key_required
 def analyze_stereotype():
     """Analyze an uploaded image and generate a stereotypical character build using Grok Vision API"""
     try:
@@ -710,12 +967,7 @@ def analyze_stereotype():
         if ',' in image_data:
             image_data = image_data.split(',')[1]
 
-        # Get available classes from config
-        classes = current_app.config.get('classes', [])
-        classes_str = ', '.join(classes)
-
-        # Format the prompt with available classes
-        prompt = STEREOTYPE_ANALYSIS.format(classes=classes_str)
+        prompt = STEREOTYPE_ANALYSIS
 
         # Prepare the request to Grok Vision API
         headers = {
@@ -775,7 +1027,7 @@ def analyze_stereotype():
             build_data = json.loads(json_str)
 
             # Validate required fields
-            required_fields = ['character_name', 'character_age', 'character_gender', 'character_class', 'story_inspiration']
+            required_fields = ['character_name', 'character_age', 'character_gender', 'story_inspiration']
             for field in required_fields:
                 if field not in build_data:
                     build_data[field] = ''
@@ -795,14 +1047,3 @@ def analyze_stereotype():
 
     except Exception as e:
         return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
-
-def make_serializable(config):
-    serializable_config = {}
-    for key, value in config.items():
-        if isinstance(value, (str, int, float, bool, list, dict, type(None))):
-            serializable_config[key] = value
-        elif isinstance(value, datetime.timedelta):
-            serializable_config[key] = str(value)
-        else:
-            serializable_config[key] = str(value)
-    return serializable_config

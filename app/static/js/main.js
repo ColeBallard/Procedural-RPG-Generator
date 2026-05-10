@@ -10,13 +10,27 @@ function getCsrfToken() {
     return match ? decodeURIComponent(match[1]) : '';
 }
 
-// Inject the CSRF header on every jQuery ajax request automatically; the
-// server ignores it for safe methods so it's harmless to send always.
+// Always pull the Grok key fresh from the input field (preferred) or
+// localStorage so AJAX requests reflect the latest user input without
+// requiring a page refresh.
+function getGrokApiKey() {
+    const fromInput = ($('#grok-api-key-input').val() || '').trim();
+    const fromStorage = (getLocalStorageItem('key-grok-xai') || '').trim();
+    return fromInput || fromStorage;
+}
+
+// Inject the CSRF and Grok-key headers on every jQuery ajax request. The
+// server ignores CSRF for safe methods, and only enforces the Grok key on
+// the routes that gate the game view.
 $.ajaxSetup({
     beforeSend: function (xhr) {
         const token = getCsrfToken();
         if (token) {
             xhr.setRequestHeader('X-CSRF-Token', token);
+        }
+        const grokKey = getGrokApiKey();
+        if (grokKey) {
+            xhr.setRequestHeader('X-Grok-API-Key', grokKey);
         }
     }
 });
@@ -25,17 +39,25 @@ $.ajaxSetup({
 // game-view accordions. Populated at startup by loadEntityTemplates().
 const entityTemplates = {};
 
-// Mapping of payload key -> { templateName, accordionId }
+// Mapping of payload key -> { templateName, accordionId }.
+// Stats, skills and statuses are no longer rendered as accordions;
+// renderCharacterProfile() owns them alongside the main character's identity.
 const ENTITY_RENDER_MAP = {
-    locations:     { template: 'location',             accordion: 'locationsAccordion' },
-    events:        { template: 'event',                accordion: 'eventsAccordion' },
-    characters:    { template: 'interactingCharacter', accordion: 'charactersAccordion' },
-    quests:        { template: 'quest',                accordion: 'questsAccordion' },
-    items:         { template: 'item',                 accordion: 'itemsAccordion' },
-    skills:        { template: 'skill',                accordion: 'skillsAccordion' },
-    statuses:      { template: 'status',               accordion: 'statusesAccordion' },
-    relationships: { template: 'relationship',         accordion: 'relationshipsAccordion' },
-    stats:         { template: 'stat',                 accordion: 'statsAccordion' },
+    locations:  { template: 'location',             accordion: 'locationsAccordion' },
+    events:     { template: 'event',                accordion: 'eventsAccordion' },
+    characters: { template: 'interactingCharacter', accordion: 'charactersAccordion' },
+    quests:     { template: 'quest',                accordion: 'questsAccordion' },
+    items:      { template: 'item',                 accordion: 'itemsAccordion' },
+};
+
+// Stat id -> short label + icon used by the character profile grid.
+const PROFILE_STAT_META = {
+    strength:     { icon: '💪', label: 'STR' },
+    speed:        { icon: '⚡', label: 'SPD' },
+    agility:      { icon: '🤸', label: 'AGI' },
+    intelligence: { icon: '🧠', label: 'INT' },
+    wisdom:       { icon: '📚', label: 'WIS' },
+    charisma:     { icon: '💬', label: 'CHA' },
 };
 
 // === Header auto-collapse state ===
@@ -72,6 +94,7 @@ function showMainMenu() {
     $('#options-view').hide();
     $('#back-to-menu-btn').hide();
     updateResumeButtonVisibility();
+    updateGameMenuButtonsState();
 }
 
 // Check if there's an active game and show/hide resume button
@@ -105,6 +128,31 @@ function showGameView() {
     $('#options-view').hide();
     $('#game-view').show();
     $('#back-to-menu-btn').show();
+}
+
+// Game view requires a Grok (xAI) API key. Keys issued by xAI are
+// prefixed with "xai-".
+function hasValidGrokApiKey() {
+    const key = getGrokApiKey();
+    return key.startsWith('xai-') && key.length > 4;
+}
+
+// Returns true when the gate is satisfied. Otherwise opens the API Key
+// Required modal so the user can choose to navigate to the API Keys view.
+function requireValidGrokApiKey() {
+    if (hasValidGrokApiKey()) return true;
+    $('#api-key-required-modal').fadeIn(200);
+    return false;
+}
+
+// Disable the menu entries that ultimately lead to the game view when no
+// valid Grok key is configured. Settings and API Keys remain reachable so
+// the user can supply a key.
+function updateGameMenuButtonsState() {
+    const enabled = hasValidGrokApiKey();
+    $('#menu-resume-game-btn, #menu-new-game-btn, #menu-load-game-btn')
+        .prop('disabled', !enabled)
+        .attr('title', enabled ? '' : 'Add a valid xAI API key in the API Keys menu to enable.');
 }
 
 $(document).ready(function () {
@@ -147,6 +195,7 @@ $(document).ready(function () {
         e.preventDefault();
         const username = $('#signin-username').val();
         const password = $('#signin-password').val();
+        const remember = $('#signin-remember').is(':checked');
 
         if (!username || !password) {
             $('#signin-error').text('Please enter both username and password');
@@ -157,7 +206,7 @@ $(document).ready(function () {
             url: '/auth/login',
             type: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({ username, password }),
+            data: JSON.stringify({ username, password, remember }),
             success: function(response) {
                 if (response.success) {
                     $('#user-welcome').text(`Welcome, ${response.username}!`);
@@ -237,16 +286,17 @@ $(document).ready(function () {
     });
 
     // Loading API keys from local storage
-    const grokApiKey = getLocalStorageItem('key-grok-xai');
     const seedId = getLocalStorageItem('current-seed-id');
+    const savedGrokApiKey = getLocalStorageItem('key-grok-xai');
 
-    if (grokApiKey) {
-        $("#grok-api-key-input").val(grokApiKey);
+    if (savedGrokApiKey) {
+        $("#grok-api-key-input").val(savedGrokApiKey);
     }
 
     // Main menu button handlers
     $('#menu-resume-game-btn').click(function (e) {
         e.preventDefault();
+        if (!requireValidGrokApiKey()) return;
         const currentSeedId = getLocalStorageItem('current-seed-id');
         if (currentSeedId) {
             showGameView();
@@ -293,6 +343,7 @@ $(document).ready(function () {
     $('#save-api-keys-btn').click(function (e) {
         e.preventDefault();
         setLocalStorageItem('key-grok-xai', $("#grok-api-key-input").val());
+        updateGameMenuButtonsState();
     });
 
     // Confirmation modal handlers
@@ -314,6 +365,26 @@ $(document).ready(function () {
         }
     });
 
+    // API Key Required modal handlers
+    $('#api-key-required-cancel-btn').click(function (e) {
+        e.preventDefault();
+        $('#api-key-required-modal').fadeOut(200);
+    });
+
+    $('#api-key-required-goto-btn').click(function (e) {
+        e.preventDefault();
+        $('#api-key-required-modal').fadeOut(200, function () {
+            showView('api-keys');
+            setTimeout(() => $('#grok-api-key-input').trigger('focus'), 0);
+        });
+    });
+
+    $('#api-key-required-modal').click(function (e) {
+        if (e.target === this) {
+            $(this).fadeOut(200);
+        }
+    });
+
     // Fetch the narrative item template
     $.get('/templates/narrativeItem.hbs', function (template) {
         narrativeTemplate = Handlebars.compile(template);
@@ -324,19 +395,40 @@ $(document).ready(function () {
     // Load all per-entity Handlebars templates used by the game-view accordions
     loadEntityTemplates();
 
-    // Fetch the entire config file from the server
-    $.get('/get_config', function (config) {
-        const classes = config.classes;
-        const classSelect = $('#new-game-character-class-input');
-        $.each(classes, function (index, cls) {
-            classSelect.append(new Option(cls, cls));
-        });
-    }).fail(function () {
-        console.error('Error fetching config');
+    // Randomize buttons in the basic-setup form. Pure client-side: a small
+    // built-in pool keeps the form responsive without round-tripping to the
+    // server. Triggers 'change' so any listeners (e.g. validation) re-run.
+    const RANDOM_NAME_POOL = [
+        'Aelar', 'Brennan', 'Cassia', 'Doran', 'Elowen', 'Fenris', 'Gwyneth',
+        'Hadrian', 'Isolde', 'Jorvik', 'Kaelen', 'Lyra', 'Mordecai', 'Nyx',
+        'Orin', 'Perrin', 'Quill', 'Rhiannon', 'Soren', 'Tamsin', 'Ulric',
+        'Vesper', 'Wrenna', 'Xander', 'Ysolde', 'Zephyr', 'Anya', 'Bram',
+        'Calla', 'Dax', 'Esme', 'Finn', 'Gideon', 'Hazel', 'Ivor', 'Juno'
+    ];
+    const RANDOM_GENDERS = ['male', 'female', 'other'];
+
+    $('#new-game-view').on('click', '.randomize-btn', function () {
+        const $btn = $(this);
+        const $target = $($btn.attr('data-target'));
+        if (!$target.length) return;
+
+        switch ($btn.attr('data-randomize')) {
+            case 'name':
+                $target.val(RANDOM_NAME_POOL[Math.floor(Math.random() * RANDOM_NAME_POOL.length)]);
+                break;
+            case 'age':
+                $target.val(Math.floor(Math.random() * 48) + 18); // 18-65
+                break;
+            case 'gender':
+                $target.val(RANDOM_GENDERS[Math.floor(Math.random() * RANDOM_GENDERS.length)]);
+                break;
+        }
+        $target.trigger('change');
     });
 
     // Handle the Create Seed button click
     $('#create-seed-btn').on('click', function () {
+        if (!requireValidGrokApiKey()) return;
         let seedData;
 
         // Check if we have a stereotype-generated build
@@ -348,14 +440,12 @@ $(document).ready(function () {
             const characterName = $('#new-game-character-name-input').val();
             const characterAge = $('#new-game-character-age-input').val();
             const characterGender = $('#new-game-character-gender-input').val();
-            const characterClass = $('#new-game-character-class-input').val();
             const storyInspiration = $('#new-game-inspiration-input').val();
 
             seedData = {
                 character_name: characterName,
                 character_age: characterAge,
                 character_gender: characterGender,
-                character_class: characterClass,
                 story_inspiration: storyInspiration
             };
         }
@@ -392,12 +482,16 @@ $(document).ready(function () {
 
     async function executeWorldBuildingWithSSE(seedId, seedData) {
         return new Promise((resolve, reject) => {
-            // First, make a POST request to start the SSE stream
+            // First, make a POST request to start the SSE stream. fetch()
+            // bypasses jQuery's ajaxSetup, so the Grok key header is set
+            // explicitly here to mirror the gating applied to $.ajax calls.
+            const grokApiKey = getGrokApiKey();
             fetch('/initialize_world_building_stream', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRF-Token': getCsrfToken()
+                    'X-CSRF-Token': getCsrfToken(),
+                    'X-Grok-API-Key': grokApiKey
                 },
                 body: JSON.stringify({
                     seed_id: seedId,
@@ -453,6 +547,7 @@ $(document).ready(function () {
                                     } else if (event.type === 'complete') {
                                         console.log('World building results:', event.results);
                                         updateNarrativeList({ text: "✓ World building completed successfully!", kind: 'system' });
+                                        // loadWorldData also fetches fresh suggestions for the new world.
                                         loadWorldData(seedId);
                                         resolve(event.results);
                                     } else if (event.type === 'error') {
@@ -492,7 +587,7 @@ $(document).ready(function () {
                 data: JSON.stringify({
                     seed_id: seedId,
                     seed_data: seedData,
-                    grok_api_key: grokApiKey
+                    grok_api_key: getGrokApiKey()
                 }),
                 success: function (response) {
                     resolve(response);
@@ -503,14 +598,13 @@ $(document).ready(function () {
             });
         });
     }
-    
+
     function loadEntityTemplates() {
         // Each entity template lives at /templates/<name>.html and is wrapped
         // in a <script type="text/x-handlebars-template"> tag. Strip the
         // wrapper before compiling so the inner markup is the template source.
         const names = [
-            'location', 'event', 'interactingCharacter', 'quest',
-            'item', 'skill', 'status', 'relationship', 'stat'
+            'location', 'event', 'interactingCharacter', 'quest', 'item'
         ];
         names.forEach(name => {
             $.get(`/templates/${name}.html`)
@@ -541,11 +635,236 @@ $(document).ready(function () {
                 Object.entries(ENTITY_RENDER_MAP).forEach(([key, cfg]) => {
                     renderEntityList(world[key] || [], cfg.template, cfg.accordion);
                 });
+                renderCharacterProfile(
+                    world.main_character,
+                    world.stats || [],
+                    world.skills || [],
+                    world.statuses || [],
+                );
+                // Suggestions reflect the latest transcript, so refresh them
+                // alongside the world payload (resume / refresh / new game).
+                loadSuggestions(seedId);
             },
             error: function (xhr) {
                 console.error('Failed to load world data:', xhr);
             }
         });
+    }
+
+    // Fetch a fresh batch of action suggestions for the current situation
+    // and render them as clickable buttons above the input box. Failures are
+    // silent: suggestions are a UX nicety and must not block the player from
+    // typing their own action.
+    function loadSuggestions(seedId) {
+        if (!seedId) return;
+        const $list = $('#optionsList');
+        const $label = $('#suggestions-label');
+        $list.empty();
+        $label.text('Loading suggestions…').show();
+        $.ajax({
+            url: `/api/seed/${seedId}/suggestions`,
+            type: 'GET',
+            success: function (response) {
+                renderSuggestions(response.suggestions || []);
+            },
+            error: function (xhr) {
+                console.error('Failed to load suggestions:', xhr);
+                renderSuggestions([]);
+            }
+        });
+    }
+
+    // Render the suggestion strings as buttons. Clicking a suggestion
+    // submits it directly as the player's next action; the textarea remains
+    // available for free-form input via the Submit button or Ctrl+Enter.
+    function renderSuggestions(suggestions) {
+        const $list = $('#optionsList');
+        const $label = $('#suggestions-label');
+        $list.empty();
+        if (!suggestions || suggestions.length === 0) {
+            $label.hide();
+            return;
+        }
+        $label.text('Suggested actions').show();
+        suggestions.forEach(text => {
+            const $li = $('<li>').addClass('nav-item');
+            const $btn = $('<button>')
+                .attr('type', 'button')
+                .addClass('btn btn-link suggestion-btn')
+                .text(text)
+                .on('click', function () {
+                    submitGameInput(text);
+                });
+            $li.append($btn);
+            $list.append($li);
+        });
+    }
+
+    // Submit the player's action to the backend, optimistically reflect it
+    // in the transcript panel, then append the narrator's reply and refresh
+    // suggestions. Disables the input controls for the duration so the
+    // player can't double-submit while a turn is in flight.
+    function submitGameInput(actionText) {
+        const seedId = getLocalStorageItem('current-seed-id');
+        const action = (actionText != null ? actionText : $('#game-input').val() || '').trim();
+        if (!seedId || !action) return;
+        if (!requireValidGrokApiKey()) return;
+
+        const $input = $('#game-input');
+        const $submit = $('#submit-game-input-btn');
+        const $error = $('#game-error');
+
+        $error.text('');
+        $input.prop('disabled', true);
+        $submit.prop('disabled', true).text('Thinking…');
+
+        // Optimistic echo so the player sees their action immediately.
+        updateNarrativeList({ text: action, kind: 'player_input', speaker: 'You' });
+
+        // Clear the suggestions while the turn is in flight; the response
+        // brings a fresh batch grounded in the new transcript state.
+        $('#optionsList').empty();
+        $('#suggestions-label').text('Loading suggestions…').show();
+
+        $.ajax({
+            url: `/api/seed/${seedId}/turn`,
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ action: action }),
+            success: function (response) {
+                if (response.narration) {
+                    updateNarrativeList({
+                        text: response.narration,
+                        kind: 'narration',
+                        speaker: 'Narrator',
+                    });
+                }
+                renderSuggestions(response.suggestions || []);
+                $input.val('');
+            },
+            error: function (xhr) {
+                const msg = xhr.responseJSON?.message || 'Failed to advance the story.';
+                $error.text(msg);
+                renderSuggestions([]);
+            },
+            complete: function () {
+                $input.prop('disabled', false);
+                $submit.prop('disabled', false).text('Submit');
+                $input.trigger('focus');
+            }
+        });
+    }
+
+    // Submit button + Ctrl/Cmd+Enter shortcut for the free-form input.
+    $('#submit-game-input-btn').on('click', function (e) {
+        e.preventDefault();
+        submitGameInput();
+    });
+    $('#game-input').on('keydown', function (e) {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            submitGameInput();
+        }
+    });
+
+    // Render the main character's identity, vitals, attributes, skills and
+    // statuses into #characterProfile. All four lists come from /api/world
+    // (stats, skills, statuses are id/name/description tuples) so the same
+    // payload feeds the headline, the attribute grid and the chip lists.
+    function renderCharacterProfile(mainCharacter, stats, skills, statuses) {
+        const $container = $('#characterProfile');
+        if (!$container.length) return;
+
+        if (!mainCharacter) {
+            $container.html('<div class="character-profile-empty">No character loaded.</div>');
+            return;
+        }
+
+        const statByKey = {};
+        (stats || []).forEach(s => { statByKey[s.id] = s.description; });
+
+        const escape = (val) => $('<div>').text(val == null ? '' : String(val)).html();
+
+        const name = escape(mainCharacter.name || 'Unnamed Hero');
+        const subtitleParts = [];
+        if (mainCharacter.race) subtitleParts.push(escape(mainCharacter.race));
+        if (mainCharacter.level != null) subtitleParts.push(`Level ${escape(mainCharacter.level)}`);
+        const subtitle = subtitleParts.join(' · ');
+
+        const cur = Number(mainCharacter.current_health);
+        const max = Number(mainCharacter.max_health);
+        const hasHealth = Number.isFinite(cur) && Number.isFinite(max) && max > 0;
+        const healthPct = hasHealth ? Math.max(0, Math.min(100, (cur / max) * 100)) : 0;
+
+        let html = '';
+        html += `<div class="profile-header">`;
+        html += `  <div class="profile-avatar">👤</div>`;
+        html += `  <div class="profile-identity">`;
+        html += `    <div class="profile-name">${name}</div>`;
+        if (subtitle) html += `<div class="profile-subtitle">${subtitle}</div>`;
+        html += `  </div>`;
+        html += `</div>`;
+
+        html += `<div class="profile-vitals">`;
+        if (hasHealth) {
+            html += `<div class="profile-vital">`;
+            html += `  <div class="profile-vital-label"><span>❤ Health</span><span>${escape(cur)} / ${escape(max)}</span></div>`;
+            html += `  <div class="profile-bar"><div class="profile-bar-fill" style="width:${healthPct}%"></div></div>`;
+            html += `</div>`;
+        }
+        if (mainCharacter.current_currency != null) {
+            html += `<div class="profile-vital-row"><span>💰 Currency</span><span>${escape(mainCharacter.current_currency)}</span></div>`;
+        }
+        if (mainCharacter.exp_points != null) {
+            html += `<div class="profile-vital-row"><span>⭐ Experience</span><span>${escape(mainCharacter.exp_points)}</span></div>`;
+        }
+        html += `</div>`;
+
+        const attributeCells = Object.entries(PROFILE_STAT_META)
+            .filter(([key]) => statByKey[key] != null)
+            .map(([key, meta]) => {
+                return `<div class="profile-stat" title="${escape(key)}">`
+                    + `<div class="profile-stat-icon">${meta.icon}</div>`
+                    + `<div class="profile-stat-label">${meta.label}</div>`
+                    + `<div class="profile-stat-value">${escape(statByKey[key])}</div>`
+                    + `</div>`;
+            })
+            .join('');
+
+        if (attributeCells) {
+            html += `<div class="profile-section-title">Attributes</div>`;
+            html += `<div class="profile-stats-grid">${attributeCells}</div>`;
+        }
+
+        html += renderProfileEntryList('⚡ Skills', skills, 'profile-skill');
+        html += renderProfileEntryList('💫 Statuses', statuses, 'profile-status');
+
+        $container.html(html);
+    }
+
+    // Render a labelled list of {name, description} entries used by the
+    // Skills and Statuses sections of the character profile. Returns an
+    // empty string when there are no entries so the section title doesn't
+    // appear above an empty list.
+    function renderProfileEntryList(title, entries, itemClass) {
+        const list = entries || [];
+        const escape = (val) => $('<div>').text(val == null ? '' : String(val)).html();
+        let html = `<div class="profile-section-title">${escape(title)}</div>`;
+        if (list.length === 0) {
+            html += `<div class="profile-entry-empty">None</div>`;
+            return html;
+        }
+        html += `<ul class="profile-entry-list">`;
+        list.forEach(entry => {
+            const name = escape(entry.name || 'Unknown');
+            const description = entry.description ? escape(entry.description) : '';
+            html += `<li class="profile-entry ${itemClass}">`
+                + `<div class="profile-entry-name">${name}</div>`
+                + (description ? `<div class="profile-entry-desc">${description}</div>` : '')
+                + `</li>`;
+        });
+        html += `</ul>`;
+        return html;
     }
 
     function renderEntityList(items, templateName, accordionId) {
@@ -590,6 +909,7 @@ $(document).ready(function () {
                         )
                     );
                     const $btn = $('<button>').addClass('btn btn-primary').text('Load').click(function () {
+                        if (!requireValidGrokApiKey()) return;
                         setLocalStorageItem('current-seed-id', s.seed_id);
                         showGameView();
                         loadWorldData(s.seed_id);
@@ -805,7 +1125,7 @@ $(document).ready(function () {
             contentType: 'application/json',
             data: JSON.stringify({
                 image_data: uploadedImageData,
-                grok_api_key: grokApiKey
+                grok_api_key: getGrokApiKey()
             }),
             success: function(response) {
                 if (response.success) {
@@ -852,10 +1172,6 @@ $(document).ready(function () {
             html += `<p><strong>Gender:</strong> ${build.character_gender}</p>`;
         }
 
-        if (build.character_class) {
-            html += `<p><strong>Class:</strong> ${build.character_class}</p>`;
-        }
-
         if (build.story_inspiration) {
             html += `<p><strong>Story Theme:</strong> ${build.story_inspiration}</p>`;
         }
@@ -896,7 +1212,6 @@ $(document).ready(function () {
             min_grok: $('#min-grok-select').val(),
             max_grok: $('#max-grok-select').val(),
             emotional_attributes: currentSettings.emotional_attributes,
-            classes: currentSettings.classes
         };
 
         $.ajax({

@@ -42,7 +42,7 @@ class WorldBuilder:
         # NameLibrary subset matching this choice. If the table is empty or
         # the LLM returns nothing usable, character names fall back to the
         # LLM-generated values.
-        self.progress_callback("Selecting naming theme for the world...")
+        self.progress_callback("Selecting theme for the world...")
         chosen = self.name_service.select_themes_for_seed(self.seed_data)
         self.name_service.assign_themes_to_seed(self.seed_id, chosen)
         results['naming_themes'] = {
@@ -55,39 +55,46 @@ class WorldBuilder:
         # Phase 1 (sequential to keep the shared SQLAlchemy session safe):
         # main character (now a single batched LLM call) + locations (also a
         # single batched call returning every sub-location).
-        self.progress_callback("Creating main character (batched)...")
+        self.progress_callback("Creating main character...")
         results['main_character'] = self.character_builder.create_main_character()
         results['main_character_skills'] = self.character_builder.create_main_character_skills()
         results['main_character_statuses'] = self.character_builder.create_main_character_statuses()
 
-        self.progress_callback("Creating locations (batched)...")
+        # Hand the protagonist a small, deliberately low-power starter kit so
+        # the opening scene has something to interact with without trivializing
+        # early encounters. The prompt caps quantity/value/weight; see
+        # WORLD_BUILDING['MAIN_CHARACTER_ITEMS_BATCH'].
+        self.progress_callback("Equipping main character with starter items...")
+        results['main_character_items'] = self.character_builder.create_main_character_items()
+
+        self.progress_callback("Creating locations...")
         results['locations'] = self.location_builder.create_locations()
 
         self.character_builder.locations = self.location_builder.locations
 
         # Phase 2: NPC generation runs in parallel across locations internally.
-        self.progress_callback("Creating surrounding characters (parallel, batched)...")
+        self.progress_callback("Creating surrounding characters...")
         results['surrounding_characters'] = self.character_builder.create_surrounding_characters()
         results['surrounding_characters_skills'] = self.character_builder.create_surrounding_characters_skills()
         results['surrounding_characters_statuses'] = self.character_builder.create_surrounding_characters_statuses()
         results['surrounding_characters_items'] = self.character_builder.create_surrounding_characters_items()
 
         # Phase 3: relationships run in parallel across pairs internally.
-        self.progress_callback("Creating surrounding characters relationships (parallel)...")
+        self.progress_callback("Creating surrounding characters relationships...")
         results['surrounding_characters_relationships'] = (
             self.character_builder.create_surrounding_characters_relationships())
 
         # Phase 3b: seed a small handful of MC <-> NPC acquaintances so the
         # protagonist starts the game knowing only a few locals; everyone
         # else is rendered as an unknown stranger by the read path.
-        self.progress_callback("Introducing main character to a few locals...")
+        self.progress_callback("Creating main character relationships...")
         results['main_character_relationships'] = (
             self.character_builder.create_main_character_relationships())
 
         # Phase 4: a single narrator-style opening passage that introduces the
         # world, the protagonist and the starting scene. Persisted by the
         # caller as a 'narration' transcript entry so it survives reloads.
-        self.progress_callback("Composing your story's opening...")
+        self.progress_callback("Composing story opening...")
         results['intro_narration'] = self._create_intro_narration()
 
         self.progress_callback("World building complete!", "success")

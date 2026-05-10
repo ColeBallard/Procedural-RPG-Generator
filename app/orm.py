@@ -3,8 +3,14 @@ import random
 from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey, SmallInteger, BigInteger, Text, Boolean, Index
+from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
+
+# Existing tables (created via database/ddl.sql) use ``int unsigned`` for id /
+# seed_id columns. New tables created through ``Base.metadata.create_all`` must
+# match that signedness or MySQL rejects the foreign key with errno 3780.
+UnsignedInt = Integer().with_variant(mysql.INTEGER(unsigned=True), 'mysql')
 
 # Load environment variables
 load_dotenv()
@@ -286,8 +292,8 @@ class NameLibrary(Base):
 # column doubles as the canonical ordering tiebreaker within a seed.
 class TranscriptEntry(Base):
     __tablename__ = 'TranscriptEntries'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    seed_id = Column(Integer, ForeignKey('Seeds.id'), nullable=False)
+    id = Column(UnsignedInt, primary_key=True, autoincrement=True)
+    seed_id = Column(UnsignedInt, ForeignKey('Seeds.id'), nullable=False)
     turn = Column(Integer)
     kind = Column(String(32), nullable=False)
     speaker = Column(String(64))
@@ -304,7 +310,6 @@ class Settings(Base):
     min_grok = Column(String(64), default='grok-4-1-fast-non-reasoning')
     max_grok = Column(String(64), default='grok-4.3')
     emotional_attributes = Column(Text)  # JSON string
-    classes = Column(Text)  # JSON string
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now)
 

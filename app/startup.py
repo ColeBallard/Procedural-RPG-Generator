@@ -34,6 +34,8 @@ def run_startup_tasks(engine, session_factory):
     """Convenience wrapper called from ``createApp``."""
     if os.getenv("AUTO_MIGRATE", "1") != "0":
         ensure_schema_extras(engine)
+        rename_columns(engine)
+        drop_retired_columns(engine)
     if os.getenv("AUTO_SEED_NAMES", "1") != "0":
         maybe_seed_name_library_async(session_factory)
 
@@ -43,6 +45,29 @@ def run_startup_tasks(engine, session_factory):
 # --------------------------------------------------------------------- #
 _EXPECTED_SEED_COLUMNS = {
     "naming_themes": "ALTER TABLE Seeds ADD COLUMN naming_themes TEXT",
+}
+
+# Columns that have been removed from the ORM and should be dropped from
+# pre-existing databases. Keyed by table; each entry maps the dropped
+# column name to the DDL used to remove it. SQLite >= 3.35 and MySQL both
+# support ``ALTER TABLE ... DROP COLUMN``.
+_RETIRED_COLUMNS = {
+    "Settings": {
+        "classes": "ALTER TABLE Settings DROP COLUMN classes",
+    },
+}
+
+# Columns that have been renamed in the ORM. Keyed by table; each entry
+# maps old_name -> (new_name, ddl). Both MySQL >= 8.0 and SQLite >= 3.25
+# support ``ALTER TABLE ... RENAME COLUMN ... TO ...``.
+_RENAMED_COLUMNS = {
+    "CharacterRelationships": {
+        "relationship": (
+            "relationship_type",
+            "ALTER TABLE CharacterRelationships "
+            "RENAME COLUMN relationship TO relationship_type",
+        ),
+    },
 }
 
 
@@ -70,6 +95,58 @@ def ensure_schema_extras(engine):
                 if column not in refreshed:
                     log.error("ensure_schema_extras: failed to add Seeds.%s: %s",
                               column, e)
+
+
+def rename_columns(engine):
+    """Rename columns whose ORM name has changed, where the old name is
+    still present and the new name is not. Idempotent; safe on every
+    restart. Must run before ``drop_retired_columns`` so the rename does
+    not race a drop on the same column."""
+    for table, columns in _RENAMED_COLUMNS.items():
+        try:
+            inspector = inspect(engine)
+            existing = {c["name"] for c in inspector.get_columns(table)}
+        except Exception as e:
+            log.warning("rename_columns: could not inspect %s: %s", table, e)
+            continue
+
+        with engine.begin() as conn:
+            for old_name, (new_name, ddl) in columns.items():
+                if old_name not in existing or new_name in existing:
+                    continue
+                try:
+                    conn.execute(text(ddl))
+                    log.info("rename_columns: renamed %s.%s -> %s",
+                             table, old_name, new_name)
+                except Exception as e:
+                    refreshed = {c["name"] for c in inspect(engine).get_columns(table)}
+                    if new_name not in refreshed:
+                        log.error("rename_columns: failed to rename %s.%s -> %s: %s",
+                                  table, old_name, new_name, e)
+
+
+def drop_retired_columns(engine):
+    """Drop columns that have been removed from the ORM, where present."""
+    for table, columns in _RETIRED_COLUMNS.items():
+        try:
+            inspector = inspect(engine)
+            existing = {c["name"] for c in inspector.get_columns(table)}
+        except Exception as e:
+            log.warning("drop_retired_columns: could not inspect %s: %s", table, e)
+            continue
+
+        with engine.begin() as conn:
+            for column, ddl in columns.items():
+                if column not in existing:
+                    continue
+                try:
+                    conn.execute(text(ddl))
+                    log.info("drop_retired_columns: dropped %s.%s", table, column)
+                except Exception as e:
+                    refreshed = {c["name"] for c in inspect(engine).get_columns(table)}
+                    if column in refreshed:
+                        log.error("drop_retired_columns: failed to drop %s.%s: %s",
+                                  table, column, e)
 
 
 # --------------------------------------------------------------------- #

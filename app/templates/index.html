@@ -7,6 +7,9 @@
 
     <title>Procedural Game Narrative Generation</title>
 
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -60,6 +63,10 @@
                     <div class="form-group">
                         <label for="signin-password">Password</label>
                         <input type="password" class="form-control" id="signin-password" placeholder="Enter your password">
+                    </div>
+                    <div class="form-check auth-remember">
+                        <input type="checkbox" class="form-check-input" id="signin-remember">
+                        <label class="form-check-label" for="signin-remember">Stay signed in</label>
                     </div>
                     <div id="signin-error" class="auth-error"></div>
                     <button class="auth-button" id="signin-btn">Sign In</button>
@@ -189,37 +196,6 @@
                                 </div>
                             </div>
                         </div>
-                    </div>
-                    </div>
-                </div>
-
-                <!-- Middle Column: Main Game Area -->
-                <div class="col-md-5">
-                    <div class="scrollable-section">
-                    <h3 class="title">Narrative</h3>
-                    <div id="game-output">
-                        <!-- Narrative content goes here -->
-                        <ul class="nav flex-column" id="narrativeList"></ul>
-                    </div>
-                    <div id="user-options">
-                        <!-- Pre-determined options -->
-                        <ul class="nav flex-column" id="optionsList"></ul>
-                        <textarea id="game-input" name="game-input" class="form-control"
-                            placeholder="Or go your own way..."></textarea>
-                        <button type="button" class="btn btn-primary" id="submit-game-input-btn">Submit</button>
-                    </div>
-                    <div class="error" id="game-error"></div>
-
-                    <!-- Optional Battle UI -->
-                    <div id="battle-ui" class="hidden"></div>
-                    </div>
-                </div>
-
-                <!-- Right Column: Player Stats and Inventory -->
-                <div class="col-md-4">
-                    <div class="border border-white rounded scrollable-section">
-                    <h3 class="title">Character</h3>
-                    <div class="accordion accordion-flush" id="characterAccordion">
                         <!-- Quests Dropdown -->
                         <div class="accordion-item">
                             <h2 class="accordion-header" id="headingQuests">
@@ -237,6 +213,43 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- Middle Column: Main Game Area -->
+                <div class="col-md-5">
+                    <div class="scrollable-section">
+                    <h3 class="title">Narrative</h3>
+                    <div id="game-output">
+                        <!-- Narrative content goes here -->
+                        <ul class="nav flex-column" id="narrativeList"></ul>
+                    </div>
+                    <div id="user-options">
+                        <!-- Suggested actions for the current situation. The
+                             label hides itself when there are no suggestions. -->
+                        <div id="suggestions-label" class="suggestions-label" style="display: none;">Suggested actions</div>
+                        <ul class="nav flex-column" id="optionsList"></ul>
+                        <textarea id="game-input" name="game-input" class="form-control"
+                            placeholder="Or go your own way... (Ctrl+Enter to submit)"></textarea>
+                        <button type="button" class="btn btn-primary" id="submit-game-input-btn">Submit</button>
+                    </div>
+                    <div class="error" id="game-error"></div>
+
+                    <!-- Optional Battle UI -->
+                    <div id="battle-ui" class="hidden"></div>
+                    </div>
+                </div>
+
+                <!-- Right Column: Player Stats and Inventory -->
+                <div class="col-md-4">
+                    <div class="border border-white rounded scrollable-section">
+                    <h3 class="title">Character</h3>
+                    <!-- Main Character Profile / Stats Summary -->
+                    <div id="characterProfile" class="character-profile">
+                        <div class="character-profile-empty">No character loaded.</div>
+                    </div>
+                    <div class="accordion accordion-flush" id="characterAccordion">
                         <!-- Items Dropdown -->
                         <div class="accordion-item">
                             <h2 class="accordion-header" id="headingItems">
@@ -254,75 +267,6 @@
                                 </div>
                             </div>
                         </div>
-                        <!-- Skills Dropdown -->
-                        <div class="accordion-item">
-                            <h2 class="accordion-header" id="headingSkills">
-                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
-                                    data-bs-target="#flush-collapseSkills" aria-expanded="false"
-                                    aria-controls="flush-collapseSkills">
-                                    Skills
-                                </button>
-                            </h2>
-                            <div id="flush-collapseSkills" class="accordion-collapse collapse"
-                                aria-labelledby="headingSkills">
-                                <div class="accordion-body">
-                                    <!-- Placeholder for dynamically added skill accordions -->
-                                    <div class="accordion accordion-flush" id="skillsAccordion"></div>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- Statuses Dropdown -->
-                        <div class="accordion-item">
-                            <h2 class="accordion-header" id="headingStatuses">
-                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
-                                    data-bs-target="#flush-collapseStatuses" aria-expanded="false"
-                                    aria-controls="flush-collapseStatuses">
-                                    Statuses
-                                </button>
-                            </h2>
-                            <div id="flush-collapseStatuses" class="accordion-collapse collapse"
-                                aria-labelledby="headingStatuses">
-                                <div class="accordion-body">
-                                    <!-- Placeholder for dynamically added status accordions -->
-                                    <div class="accordion accordion-flush" id="statusesAccordion"></div>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- Relationships Dropdown -->
-                        <div class="accordion-item">
-                            <h2 class="accordion-header" id="headingRelationships">
-                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
-                                    data-bs-target="#flush-collapseRelationships" aria-expanded="false"
-                                    aria-controls="flush-collapseRelationships">
-                                    Relationships
-                                </button>
-                            </h2>
-                            <div id="flush-collapseRelationships" class="accordion-collapse collapse"
-                                aria-labelledby="headingRelationships">
-                                <div class="accordion-body">
-                                    <!-- Placeholder for dynamically added relationship accordions -->
-                                    <div class="accordion accordion-flush" id="relationshipsAccordion"></div>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- Stats Dropdown -->
-                        <div class="accordion-item">
-                            <h2 class="accordion-header" id="headingStats">
-                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
-                                    data-bs-target="#flush-collapseStats" aria-expanded="false"
-                                    aria-controls="flush-collapseStats">
-                                    Stats
-                                </button>
-                            </h2>
-                            <div id="flush-collapseStats" class="accordion-collapse collapse"
-                                aria-labelledby="headingStats">
-                                <div class="accordion-body">
-                                    <!-- Placeholder for dynamically added stat accordions -->
-                                    <div class="accordion accordion-flush" id="statsAccordion"></div>
-                                </div>
-                            </div>
-                        </div>
-
                     </div>
                     </div>
                 </div>
@@ -353,31 +297,35 @@
                         <h3 class="tab-heading">Basic Setup</h3>
                         <div class="input">
                             <label class="input-label" for="new-game-character-name-input">👤 Character Name</label>
-                            <input type="text" class="form-control" id="new-game-character-name-input"
-                                name="new-game-character-name-input" placeholder="Enter your character's name (optional)">
+                            <div class="input-with-randomize">
+                                <input type="text" class="form-control" id="new-game-character-name-input"
+                                    name="new-game-character-name-input" placeholder="Enter your character's name (optional)">
+                                <button type="button" class="randomize-btn" data-randomize="name"
+                                    data-target="#new-game-character-name-input" title="Randomize">🎲</button>
+                            </div>
                         </div>
                         <div class="input">
                             <label class="input-label" for="new-game-character-age-input">🎂 Age</label>
-                            <input type="number" class="form-control" id="new-game-character-age-input"
-                                name="new-game-character-age-input" placeholder="Enter age (optional)" min="1" max="999">
+                            <div class="input-with-randomize">
+                                <input type="number" class="form-control" id="new-game-character-age-input"
+                                    name="new-game-character-age-input" placeholder="Enter age (optional)" min="1" max="999">
+                                <button type="button" class="randomize-btn" data-randomize="age"
+                                    data-target="#new-game-character-age-input" title="Randomize">🎲</button>
+                            </div>
                         </div>
                         <div class="input">
                             <label class="input-label" for="new-game-character-gender-input">⚧ Gender</label>
-                            <select class="form-control" id="new-game-character-gender-input"
-                                name="new-game-character-gender-input">
-                                <option value="">Select gender (optional)</option>
-                                <option value="male">Male</option>
-                                <option value="female">Female</option>
-                                <option value="other">Other</option>
-                            </select>
-                        </div>
-                        <div class="input">
-                            <label class="input-label" for="new-game-character-class-input">⚔️ Class</label>
-                            <select class="form-control" id="new-game-character-class-input"
-                                name="new-game-character-class-input">
-                                <option value="">Select class (optional)</option>
-                                <!-- Options will be populated dynamically -->
-                            </select>
+                            <div class="input-with-randomize">
+                                <select class="form-control" id="new-game-character-gender-input"
+                                    name="new-game-character-gender-input">
+                                    <option value="">Select gender (optional)</option>
+                                    <option value="male">Male</option>
+                                    <option value="female">Female</option>
+                                    <option value="other">Other</option>
+                                </select>
+                                <button type="button" class="randomize-btn" data-randomize="gender"
+                                    data-target="#new-game-character-gender-input" title="Randomize">🎲</button>
+                            </div>
                         </div>
                     </div>
 
@@ -512,6 +460,23 @@
                 <div class="confirmation-modal-footer">
                     <button class="modal-button modal-button-cancel" id="cancel-new-game-btn">Cancel</button>
                     <button class="modal-button modal-button-confirm" id="confirm-new-game-btn">Start New Game</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- API Key Required Modal -->
+        <div id="api-key-required-modal" class="confirmation-modal" style="display: none;">
+            <div class="confirmation-modal-content">
+                <div class="confirmation-modal-header">
+                    <h3>🔑 API Key Required</h3>
+                </div>
+                <div class="confirmation-modal-body">
+                    <p>A valid xAI API key is required to access the game.</p>
+                    <p>Please enter and save your key (starting with <code>xai-</code>) in the API Keys menu.</p>
+                </div>
+                <div class="confirmation-modal-footer">
+                    <button class="modal-button modal-button-cancel" id="api-key-required-cancel-btn">Cancel</button>
+                    <button class="modal-button modal-button-confirm" id="api-key-required-goto-btn">Go to API Keys</button>
                 </div>
             </div>
         </div>

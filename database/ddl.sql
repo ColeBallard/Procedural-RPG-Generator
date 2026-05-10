@@ -53,7 +53,7 @@ CREATE TABLE `CharacterRelationships` (
   `seed_id` int unsigned NOT NULL,
   `character_id` int unsigned NOT NULL,
   `related_character_id` int unsigned NOT NULL,
-  `relationship` varchar(64) DEFAULT NULL,
+  `relationship_type` varchar(64) DEFAULT NULL,
   `attraction` smallint DEFAULT 5,
   `respect` smallint DEFAULT 5,
   `trust` smallint DEFAULT 5,
@@ -311,8 +311,8 @@ CREATE TABLE `Steps` (
 -- TranscriptEntries definition
 
 CREATE TABLE `TranscriptEntries` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `seed_id` int NOT NULL,
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `seed_id` int unsigned NOT NULL,
   `turn` int DEFAULT NULL,
   `kind` varchar(32) NOT NULL,
   `speaker` varchar(64) DEFAULT NULL,

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+    <defs>
+        <linearGradient id="blade" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#a7f3d0"/>
+            <stop offset="55%" stop-color="#34d399"/>
+            <stop offset="100%" stop-color="#059669"/>
+        </linearGradient>
+        <linearGradient id="hilt" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#fbbf24"/>
+            <stop offset="100%" stop-color="#b45309"/>
+        </linearGradient>
+    </defs>
+    <rect width="32" height="32" rx="6" fill="#0f172a"/>
+    <rect x="3.5" y="3.5" width="25" height="25" rx="4.5" fill="none" stroke="#10b981" stroke-width="0.6" opacity="0.55"/>
+    <path d="M16 3 L18.2 6.5 L18.2 19 L16 21 L13.8 19 L13.8 6.5 Z" fill="url(#blade)" stroke="#065f46" stroke-width="0.4" stroke-linejoin="round"/>
+    <line x1="16" y1="6.5" x2="16" y2="19" stroke="#065f46" stroke-width="0.4" opacity="0.7"/>
+    <rect x="8.5" y="19" width="15" height="2.2" rx="1" fill="url(#hilt)" stroke="#7c2d12" stroke-width="0.3"/>
+    <rect x="14.8" y="21.2" width="2.4" height="5.6" fill="#1e293b" stroke="#475569" stroke-width="0.3"/>
+    <line x1="14.8" y1="22.6" x2="17.2" y2="22.6" stroke="#475569" stroke-width="0.25"/>
+    <line x1="14.8" y1="24.0" x2="17.2" y2="24.0" stroke="#475569" stroke-width="0.25"/>
+    <line x1="14.8" y1="25.4" x2="17.2" y2="25.4" stroke="#475569" stroke-width="0.25"/>
+    <circle cx="16" cy="27.6" r="1.7" fill="url(#hilt)" stroke="#7c2d12" stroke-width="0.3"/>
+</svg>

@@ -10,7 +10,6 @@ Look at this person. Really look at them. Now, based on their appearance, style,
 - character_name: Give them a hilariously fitting character name that perfectly captures their try-hard energy or complete lack thereof. Be creative and savage.
 - character_age: Pick an age for the character (not their real age, obviously—we're not that cruel... yet)
 - character_gender: Character gender (male, female, or other)
-- character_class: Choose from: {classes} - Pick the most stereotypically obvious one based on their vibe
 
 **Story & Theme:**
 - story_inspiration: A detailed, sarcastic description of the story theme and setting this person would OBVIOUSLY gravitate toward. Mock their predictable genre preferences (fantasy, sci-fi, horror, etc.), their probably-too-serious tone, and the cliché story elements they'd think are "deep and original." Be specific and cutting.
@@ -21,14 +20,13 @@ Look at this person. Really look at them. Now, based on their appearance, style,
 Don't hold back. Be sarcastic, be snarky, be savage. This person asked for it by uploading their photo. Make it hurt (in a funny way).
 
 Please output your response in JSON format with the following structure:
-{{
+{
     "character_name": "...",
     "character_age": ...,
     "character_gender": "...",
-    "character_class": "...",
     "story_inspiration": "...",
     "description": "..."
-}}
+}
 """
 
 WORLD_BUILDING = {
@@ -45,6 +43,23 @@ WORLD_BUILDING = {
         "  skills: array of {{name, description}} (3-6 entries)\n"
         "  statuses: array of {{name, description, type, duration}} (2-4 entries; "
         "include both buffs and debuffs; duration in seconds)\n"
+        "Output JSON only."
+    ),
+    'MAIN_CHARACTER_ITEMS_BATCH': (
+        "Pick a small starting inventory for the main character of a new RPG run.\n\n"
+        "Main character:\n{character}\n\n"
+        "World seed (for tone/genre fit):\n{seed_data}\n\n"
+        "Constraints (strict):\n"
+        "  - Return 2-4 items only.\n"
+        "  - Items must be BASIC and LOW-POWER: mundane gear, consumables, or "
+        "tools appropriate to a level-1 character. No legendary, magical, "
+        "unique, or named artifacts. No rare materials.\n"
+        "  - Prefer common starter fare (e.g. simple weapon, basic clothing, "
+        "small ration, minor healing item, a few coins' worth of supplies).\n"
+        "  - Keep value low (each item value <= 25) and weight reasonable "
+        "(each item weight <= 5 kg). Quantities small (1-5).\n\n"
+        "Return a single JSON object: {{\"items\": [ ... ]}} where each item has:\n"
+        "  name, description, type, value, weight, quantity\n"
         "Output JSON only."
     ),
     'LOCATIONS_BATCH': (
@@ -87,6 +102,38 @@ WORLD_BUILDING = {
         "Other nearby locations:\n{other_locations}\n\n"
         "Write only the narration prose. No headings, no meta commentary, "
         "no bullet lists, no quoted dialogue from the character."
+    ),
+    'CONTINUE_NARRATIVE': (
+        "You are the narrator of a text-based RPG. Continue the story in "
+        "second-person ('you') based on the player's latest action. Keep "
+        "the response to 1-3 short paragraphs. Stay grounded in the world "
+        "and the recent transcript; don't contradict established facts. "
+        "Don't speak for the player or decide what they do next; end on a "
+        "beat that invites their next action.\n\n"
+        "World seed:\n{seed_data}\n\n"
+        "Main character:\n{character}\n\n"
+        "Starting location:\n{starting_location}\n\n"
+        "Other nearby locations:\n{other_locations}\n\n"
+        "Recent transcript (oldest first):\n{transcript}\n\n"
+        "Player's latest action:\n{player_action}\n\n"
+        "Write only the narration prose. No headings, no meta commentary, "
+        "no bullet lists."
+    ),
+    'SUGGEST_ACTIONS': (
+        "You are assisting the player of a text-based RPG by proposing 4 "
+        "short, varied actions they could take right now. Each suggestion "
+        "must be a single short imperative phrase (3-8 words), written "
+        "from the player's perspective (e.g. 'Search the room', 'Ask "
+        "the innkeeper about rumours'). Avoid duplicates; cover a mix of "
+        "exploration, dialogue, and decisive action that fits the scene.\n\n"
+        "World seed:\n{seed_data}\n\n"
+        "Main character:\n{character}\n\n"
+        "Starting location:\n{starting_location}\n\n"
+        "Other nearby locations:\n{other_locations}\n\n"
+        "Recent transcript (oldest first):\n{transcript}\n\n"
+        "Return a single JSON object: {{\"suggestions\": [\"...\", \"...\", "
+        "\"...\", \"...\"]}}\n"
+        "Output JSON only."
     ),
     'NAMING_THEME_SELECTION': (
         "You are picking the naming aesthetic for an entire RPG world. The choice "

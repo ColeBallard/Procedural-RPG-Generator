@@ -9,6 +9,17 @@
         <div id="flush-collapseCharacter{{id}}" class="accordion-collapse collapse" aria-labelledby="headingCharacter{{id}}">
             <div class="accordion-body">
                 {{description}}
+                {{#if relationship}}
+                <div class="character-relationship">
+                    {{#if relationship.relationship_type}}<div>Relationship: {{relationship.relationship_type}}</div>{{/if}}
+                    <div>Attraction: {{relationship.attraction}}</div>
+                    <div>Respect: {{relationship.respect}}</div>
+                    <div>Trust: {{relationship.trust}}</div>
+                    <div>Familiarity: {{relationship.familiarity}}</div>
+                    <div>Anger: {{relationship.anger}}</div>
+                    <div>Fear: {{relationship.fear}}</div>
+                </div>
+                {{/if}}
             </div>
         </div>
     </div>

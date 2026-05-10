@@ -3,6 +3,7 @@ import secrets
 import yaml
 import json
 import logging
+from datetime import timedelta
 
 from dotenv import load_dotenv
 
@@ -81,11 +82,21 @@ def createApp():
         os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
     )
 
-    # Toggle CSRF and login-required gates. Both default to on for the real
-    # app; tests construct their own Flask app without these flags so they
-    # bypass the gates.
+    # Lifetime applied to sessions that opt in to "Stay signed in" via the
+    # login form. Configurable via env so operators can tune it without a
+    # code change; defaults to 30 days.
+    try:
+        remember_days = int(os.getenv('REMEMBER_ME_DAYS', '30'))
+    except ValueError:
+        remember_days = 30
+    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=remember_days)
+
+    # Toggle CSRF, login-required and Grok-key-required gates. All default
+    # to on for the real app; tests construct their own Flask app without
+    # these flags so they bypass the gates.
     app.config['CSRF_ENABLED'] = True
     app.config['LOGIN_REQUIRED'] = True
+    app.config['GROK_API_KEY_REQUIRED'] = True
     app.before_request(_csrf_protect)
     app.after_request(_csrf_set_cookie)
 
@@ -147,7 +158,6 @@ def createApp():
                     min_grok=config_data.get('min_grok', 'grok-4-1-fast-non-reasoning'),
                     max_grok=config_data.get('max_grok', 'grok-4.3'),
                     emotional_attributes=json.dumps(config_data.get('emotional_attributes', {})),
-                    classes=json.dumps(config_data.get('classes', []))
                 )
                 session.add(settings_record)
                 session.commit()
@@ -159,7 +169,6 @@ def createApp():
                     min_grok='grok-4-1-fast-non-reasoning',
                     max_grok='grok-4.3',
                     emotional_attributes=json.dumps({}),
-                    classes=json.dumps([])
                 )
                 session.add(settings_record)
                 session.commit()
@@ -168,7 +177,6 @@ def createApp():
         app.config['min_grok'] = settings_record.min_grok
         app.config['max_grok'] = settings_record.max_grok
         app.config['emotional_attributes'] = json.loads(settings_record.emotional_attributes) if settings_record.emotional_attributes else {}
-        app.config['classes'] = json.loads(settings_record.classes) if settings_record.classes else []
 
         logging.info("Settings loaded from database")
     except Exception as e:
@@ -177,7 +185,6 @@ def createApp():
         app.config['min_grok'] = 'grok-4-1-fast-non-reasoning'
         app.config['max_grok'] = 'grok-4.3'
         app.config['emotional_attributes'] = {}
-        app.config['classes'] = []
     finally:
         session.close()
 
