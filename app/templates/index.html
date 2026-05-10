@@ -435,11 +435,19 @@
                     <input class="form-control" type="password" id="grok-api-key-input"
                         name="grok-api-key-input" placeholder="xai-... (Required for narrative generation)">
                 </div>
-                <button type="button" class="other-button" id="save-api-keys-btn">💾 Save to Local Storage</button>
+                <div id="grok-api-key-status" class="grok-key-status-missing">⚠️ No key configured</div>
+                <button type="button" class="other-button" id="save-api-keys-btn">💾 Save Key</button>
+                <button type="button" class="other-button" id="clear-api-key-btn" disabled>🗑️ Clear Key</button>
+                <div id="api-keys-message" style="display: none;"></div>
                 <div id="api-keys-note">
-                    <strong>🔒 Privacy Notice:</strong> This feature is optional and uses your browser's local storage
-                    to remember your API key. We <strong>DO NOT</strong> store or transmit your key to any server.
-                    The key remains in your browser only. The Grok API key is required for the application to function properly.
+                    <strong>🔒 Privacy Notice:</strong> Your Grok API key is sent to this application's
+                    server once (over HTTPS) when you click <em>Save Key</em>. The server holds it
+                    encrypted in memory, scoped to your authenticated session, and never writes it to
+                    disk, a database, or any log. Subsequent gated requests retrieve the key from that
+                    in-memory store, so it is <strong>never sent back to the browser</strong> and is
+                    not stored in this browser's local storage. The key is dropped automatically when
+                    you log out, when the session expires, or when you click <em>Clear Key</em>.
+                    The Grok API key is required for the application to function properly.
                     <br><br>
                     <strong>ℹ️ Getting your Grok API key:</strong> Visit <a href="https://console.x.ai" target="_blank">console.x.ai</a>
                     to create an account and generate your API key.

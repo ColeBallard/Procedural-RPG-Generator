@@ -22,6 +22,20 @@ from app.services.gpt_service import GPTService
 from app.world_building.world_building import WorldBuilder
 from app.prompt_templates import STEREOTYPE_ANALYSIS, WORLD_BUILDING
 
+# Rate limiter is initialised in createApp(); when it isn't available (the
+# package failed to import) or hasn't been bound to a test app, ``limit``
+# becomes a no-op so the route decorators stay valid in every context.
+from app import limiter as _limiter
+from app import grok_key_store as _grok_key_store
+
+
+def limit(spec):
+    if _limiter is None:
+        def _noop(f):
+            return f
+        return _noop
+    return _limiter.limit(spec)
+
 # Cap on how many trailing transcript entries are folded into the per-turn
 # context. Keeps prompts bounded as the game grows; the world-building
 # progress lines are filtered out to spend the budget on actual story beats.
@@ -53,15 +67,25 @@ def _is_valid_grok_key(key):
 
 
 def _extract_grok_api_key():
-    # Header-first lookup keeps a single client-side setup point (see
-    # ajaxSetup in main.js) for both GET and POST. Falls back to the JSON
-    # body for existing POST routes that already inline the key.
-    key = request.headers.get('X-Grok-API-Key')
-    if key:
-        return key.strip()
-    if request.is_json:
-        body = request.get_json(silent=True) or {}
-        return (body.get('grok_api_key') or '').strip()
+    # Production transport: server-side, session-scoped store. The user
+    # pushes the key once via POST /api/grok-key after signing in; the
+    # encrypted blob lives in process memory keyed by user_id and is
+    # retrieved here on every gated request. The key never travels back to
+    # the browser and is never read from a request header or body.
+    user_id = session.get('user_id')
+    if user_id is not None:
+        stored = _grok_key_store.get(user_id)
+        if stored:
+            return stored
+    # Test/legacy fallback: only honoured when GROK_API_KEY_REQUIRED is off
+    # (i.e. the unit-test apps that build their own Flask instance without
+    # the gate). The production app always sets the gate, so this branch is
+    # unreachable there and an attacker cannot bypass the session store by
+    # sending the header directly.
+    if not current_app.config.get('GROK_API_KEY_REQUIRED'):
+        key = request.headers.get('X-Grok-API-Key')
+        if key:
+            return key.strip()
     return ''
 
 
@@ -93,6 +117,7 @@ def serve_template(filename):
 
 @main.route('/create_seed', methods=['POST'])
 @login_required
+@limit("30 per hour")
 def create_seed():
     Session = current_app.config['SESSION_FACTORY']
     session = Session()
@@ -117,20 +142,23 @@ def create_seed():
 @main.route('/initialize_world_building', methods=['POST'])
 @login_required
 @grok_api_key_required
+@limit("10 per hour")
 def initialize_world_building():
     data = request.json
     seed_id = data.get('seed_id')
     seed_data = data.get('seed_data')
-    grok_api_key = data.get('grok_api_key')
-
-    # Set the Grok API key for this request (using OpenAI SDK with xAI base URL)
-    current_app.openai.api_key = grok_api_key
+    grok_api_key = _extract_grok_api_key()
 
     Session = current_app.config['SESSION_FACTORY']
     db_session = Session()
 
+    # Build a per-request OpenAI client so concurrent requests with different
+    # API keys cannot stomp on each other via shared mutable state. Mirrors
+    # the streaming route's pattern.
+    openai_client = OpenAI(api_key=grok_api_key, base_url="https://api.x.ai/v1")
+
     try:
-        world_builder = WorldBuilder(seed_data, seed_id, db_session, current_app.openai, current_app.config['min_grok'])
+        world_builder = WorldBuilder(seed_data, seed_id, db_session, openai_client, current_app.config['min_grok'])
 
         # Orchestrate the world-building process by calling the build_world method
         results = world_builder.build_world()
@@ -146,11 +174,12 @@ def initialize_world_building():
 @main.route('/initialize_world_building_stream', methods=['POST'])
 @login_required
 @grok_api_key_required
+@limit("10 per hour")
 def initialize_world_building_stream():
     data = request.json
     seed_id = data.get('seed_id')
     seed_data = data.get('seed_data')
-    grok_api_key = data.get('grok_api_key')
+    grok_api_key = _extract_grok_api_key()
 
     # Capture the real app object and config values up front so the background
     # thread does not depend on the request-bound current_app proxy.
@@ -606,6 +635,7 @@ def _generate_suggestions(gpt_service, context):
 @main.route('/api/seed/<int:seed_id>/suggestions', methods=['GET'])
 @login_required
 @grok_api_key_required
+@limit("60 per minute")
 def get_suggestions(seed_id):
     """Return short action suggestions for the player's current situation."""
     Session = current_app.config['SESSION_FACTORY']
@@ -626,6 +656,7 @@ def get_suggestions(seed_id):
 @main.route('/api/seed/<int:seed_id>/turn', methods=['POST'])
 @login_required
 @grok_api_key_required
+@limit("60 per minute")
 def submit_turn(seed_id):
     """Accept a player action, persist it, and return the narrator's reply.
 
@@ -846,6 +877,7 @@ def _build_stats(c):
 
 @main.route('/test-grok-key', methods=['POST'])
 @login_required
+@limit("30 per minute")
 def test_grok_key():
     api_key = request.json['api_key']
     headers = {
@@ -866,6 +898,7 @@ def test_grok_key():
         return jsonify({'valid': False, 'message': 'API key is not valid.', 'error': response.json()}), 400
 
 @main.route('/auth/signup', methods=['POST'])
+@limit("5 per hour")
 def signup():
     data = request.json
     username = data.get('username')
@@ -905,6 +938,7 @@ def signup():
         db_session.close()
 
 @main.route('/auth/login', methods=['POST'])
+@limit("20 per minute")
 def login():
     data = request.json
     username = data.get('username')
@@ -938,8 +972,66 @@ def login():
 
 @main.route('/auth/logout', methods=['POST'])
 def logout():
+    # Drop the encrypted Grok key bound to this user before clearing the
+    # session: once the session is cleared we lose the user_id needed to
+    # locate the entry, leaving a stale blob in the store until its TTL.
+    user_id = session.get('user_id')
+    if user_id is not None:
+        _grok_key_store.clear(user_id)
     session.clear()
     return jsonify({'success': True, 'message': 'Logged out successfully'}), 200
+
+
+@main.route('/api/grok-key', methods=['GET'])
+@login_required
+def grok_key_status():
+    """Report whether a Grok key is currently bound to the user's session.
+
+    The frontend uses this on startup (and after every Save/Clear) to update
+    the cached ``hasValidGrokApiKey`` flag that drives the menu button state
+    and the API-key-required modal. The actual key value is never returned.
+    """
+    user_id = session.get('user_id')
+    present = bool(user_id is not None and _grok_key_store.has(user_id))
+    return jsonify({'present': present}), 200
+
+
+@main.route('/api/grok-key', methods=['POST'])
+@login_required
+@limit("20 per hour")
+def grok_key_set():
+    """Bind an xAI API key to the caller's session.
+
+    The key arrives in the JSON body of this single endpoint, never on any
+    other request. It is encrypted with a SECRET_KEY-derived Fernet token
+    and held in process memory under the authenticated user_id; subsequent
+    gated routes look it up via _extract_grok_api_key() without the key
+    travelling on the wire again.
+    """
+    data = request.get_json(silent=True) or {}
+    api_key = (data.get('api_key') or '').strip()
+    if not _is_valid_grok_key(api_key):
+        return jsonify({
+            'success': False,
+            'message': 'A valid xAI API key (starting with "xai-") is required.'
+        }), 400
+    user_id = session.get('user_id')
+    if user_id is None:
+        # login_required already enforces this in production; defensive guard
+        # for ad-hoc apps that mount the blueprint without the gate.
+        return jsonify({'success': False, 'message': 'Authentication required.'}), 401
+    _grok_key_store.set(user_id, api_key)
+    return jsonify({'success': True, 'present': True}), 200
+
+
+@main.route('/api/grok-key', methods=['DELETE'])
+@login_required
+def grok_key_clear():
+    """Drop the user's stored Grok key from the in-memory store."""
+    user_id = session.get('user_id')
+    if user_id is not None:
+        _grok_key_store.clear(user_id)
+    return jsonify({'success': True, 'present': False}), 200
 
 @main.route('/auth/check', methods=['GET'])
 def check_auth():
@@ -950,18 +1042,20 @@ def check_auth():
 @main.route('/analyze_stereotype', methods=['POST'])
 @login_required
 @grok_api_key_required
+@limit("20 per hour")
 def analyze_stereotype():
     """Analyze an uploaded image and generate a stereotypical character build using Grok Vision API"""
     try:
-        data = request.json
+        data = request.json or {}
         image_data = data.get('image_data')
-        grok_api_key = data.get('grok_api_key')
+        # Header-only transport: the @grok_api_key_required decorator already
+        # rejected the request if the header is missing or malformed, so by
+        # this point _extract_grok_api_key() is guaranteed to return a key
+        # that satisfies _is_valid_grok_key().
+        grok_api_key = _extract_grok_api_key()
 
         if not image_data:
             return jsonify({'success': False, 'message': 'No image data provided'}), 400
-
-        if not grok_api_key:
-            return jsonify({'success': False, 'message': 'Grok API key is required'}), 400
 
         # Extract base64 image data (remove data:image/...;base64, prefix if present)
         if ',' in image_data:

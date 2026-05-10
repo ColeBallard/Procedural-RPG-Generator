@@ -1,5 +1,10 @@
+import base64
+import hashlib
 import os
+import re
 import secrets
+import threading
+import time
 import yaml
 import json
 import logging
@@ -7,10 +12,10 @@ from datetime import timedelta
 
 from dotenv import load_dotenv
 
+from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, abort, current_app, request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from openai import OpenAI
 
 from .orm import Base, Settings
 from .startup import run_startup_tasks
@@ -23,6 +28,75 @@ from .world_building.world_building import WorldBuilder
 CSRF_COOKIE_NAME = 'csrf_token'
 CSRF_HEADER_NAME = 'X-CSRF-Token'
 _CSRF_SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
+
+# --- Log scrubbing -----------------------------------------------------------
+# Patterns that match secrets we never want to land in log records: xAI keys,
+# Authorization Bearer tokens, the X-Grok-API-Key header value, and the legacy
+# grok_api_key body field (the latter still appears in older deployments and
+# in third-party tracebacks). Each replacement keeps a short prefix so log
+# diffs remain useful for debugging.
+_REDACTED = '[REDACTED]'
+_SCRUB_PATTERNS = [
+    (re.compile(r'xai-[A-Za-z0-9_\-]{4,}'), 'xai-' + _REDACTED),
+    (re.compile(r'(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._\-]+'),
+     r'\1' + _REDACTED),
+    (re.compile(r'(?i)(x-grok-api-key\s*[:=]\s*)[^\s,;"\']+'),
+     r'\1' + _REDACTED),
+    (re.compile(r'(?i)("?(?:grok_api_key|api_key|password)"?\s*[:=]\s*"?)[^"\s,}]+'),
+     r'\1' + _REDACTED),
+]
+
+
+def _scrub(text):
+    if not isinstance(text, str) or not text:
+        return text
+    for pattern, replacement in _SCRUB_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class SecretScrubFilter(logging.Filter):
+    """Redact known secret shapes from log records before they're emitted.
+
+    Applied at the root logger so it covers application logs, werkzeug's
+    request log, and gunicorn's error log. Both ``record.msg`` and any
+    pre-formatted ``record.args`` are scrubbed; falling back to the formatted
+    message (``record.getMessage()``) catches handlers that bypass the args.
+    """
+
+    def filter(self, record):
+        try:
+            record.msg = _scrub(record.msg) if isinstance(record.msg, str) else record.msg
+            if record.args:
+                if isinstance(record.args, tuple):
+                    record.args = tuple(_scrub(a) if isinstance(a, str) else a
+                                        for a in record.args)
+                elif isinstance(record.args, dict):
+                    record.args = {k: (_scrub(v) if isinstance(v, str) else v)
+                                   for k, v in record.args.items()}
+        except Exception:
+            # Never let logging-filter bugs break logging itself.
+            pass
+        return True
+
+
+def _install_log_scrubbing():
+    """Attach SecretScrubFilter to every logger that currently has handlers.
+
+    Idempotent: re-running attaches a fresh filter only where one of the same
+    type isn't already present. Covers the root logger plus the named loggers
+    Flask, werkzeug and gunicorn use under WSGI.
+    """
+    targets = [logging.getLogger()]  # root
+    for name in ('werkzeug', 'gunicorn', 'gunicorn.error', 'gunicorn.access',
+                 'flask.app'):
+        targets.append(logging.getLogger(name))
+    for log in targets:
+        if not any(isinstance(f, SecretScrubFilter) for f in log.filters):
+            log.addFilter(SecretScrubFilter())
+        for handler in log.handlers:
+            if not any(isinstance(f, SecretScrubFilter) for f in handler.filters):
+                handler.addFilter(SecretScrubFilter())
 
 
 def _csrf_protect():
@@ -47,6 +121,157 @@ def _csrf_set_cookie(response):
             httponly=False,
         )
     return response
+
+
+# --- Response hardening ------------------------------------------------------
+# Content-Security-Policy assembled in pieces so the CDN allow-list stays
+# obvious and the inline-style carve-out (required by the existing template's
+# inline ``style="..."`` attributes and dynamically-set styles in main.js) is
+# explicit. Scripts are restricted to 'self' + the SRI-pinned CDNs the page
+# already loads; no 'unsafe-inline' for scripts.
+_CSP_DIRECTIVES = (
+    "default-src 'self'",
+    "script-src 'self' https://cdn.jsdelivr.net https://code.jquery.com",
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
+        "https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+)
+_CSP_HEADER_VALUE = '; '.join(_CSP_DIRECTIVES)
+
+
+def _security_headers(response):
+    """Attach defense-in-depth response headers and disable caching of
+    sensitive payloads.
+
+    ``Cache-Control: no-store`` is set on JSON and SSE responses so an
+    intermediary cache cannot retain a response that may have been built
+    from per-user data. HSTS is only emitted when the operator has signalled
+    HTTPS via ``SESSION_COOKIE_SECURE`` so local HTTP development is not
+    pinned to HTTPS by an accidental cache.
+    """
+    response.headers.setdefault('Content-Security-Policy', _CSP_HEADER_VALUE)
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    if current_app.config.get('SESSION_COOKIE_SECURE'):
+        response.headers.setdefault(
+            'Strict-Transport-Security',
+            'max-age=31536000; includeSubDomains',
+        )
+    mimetype = (response.mimetype or '').lower()
+    if mimetype == 'application/json' or mimetype == 'text/event-stream':
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers.setdefault('Pragma', 'no-cache')
+    return response
+
+
+# --- Rate limiting -----------------------------------------------------------
+# Module-level Limiter so the routes module can decorate handlers at import
+# time. Calling ``limiter.init_app(app)`` activates enforcement; tests build
+# their own Flask app without calling it, so the decorators are inert there
+# (matching how the CSRF and login gates are configured).
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+
+    def _rate_limit_key():
+        # Rate-limit by authenticated user when available so multiple users
+        # behind a shared NAT don't share a single bucket; fall back to the
+        # remote address for unauthenticated routes (signup, login, the
+        # landing page).
+        from flask import session as flask_session
+        user_id = flask_session.get('user_id') if flask_session else None
+        if user_id:
+            return f'user:{user_id}'
+        return f'ip:{get_remote_address()}'
+
+    limiter = Limiter(
+        key_func=_rate_limit_key,
+        default_limits=[],  # explicit per-route limits only
+        storage_uri='memory://',
+        headers_enabled=True,
+    )
+except ImportError:  # pragma: no cover - flask-limiter is a hard dep in prod
+    limiter = None
+
+
+# --- Server-side, session-scoped Grok key storage ---------------------------
+# Replaces the previous "key in browser localStorage, sent on every request"
+# scheme. The browser pushes the key once via POST /api/grok-key after the
+# user signs in; the server stores it encrypted-at-rest in process memory
+# under the authenticated user_id, and every subsequent gated route reads it
+# back via _extract_grok_api_key(). The key never travels on the wire again.
+#
+# Encryption-at-rest is symmetric Fernet keyed off SECRET_KEY: it doesn't
+# defend against an attacker with code execution (they can read SECRET_KEY
+# too), but it keeps raw keys out of any accidental memory/dict dump and
+# makes the intent of the storage explicit.
+def _derive_fernet_key(secret):
+    return base64.urlsafe_b64encode(hashlib.sha256(secret.encode('utf-8')).digest())
+
+
+class GrokKeyStore:
+    """Process-local, encrypted, TTL-bounded store of per-user Grok keys.
+
+    Keyed by the authenticated user's id. Entries auto-expire after the same
+    interval as the Flask session ("Stay signed in" lifetime), so a key that
+    was pushed by a since-logged-out user cannot outlive the session it was
+    bound to.
+    """
+
+    def __init__(self):
+        self._store = {}
+        self._lock = threading.Lock()
+        self._fernet = None
+
+    def _f(self):
+        if self._fernet is None:
+            self._fernet = Fernet(_derive_fernet_key(current_app.config['SECRET_KEY']))
+        return self._fernet
+
+    def _ttl_seconds(self):
+        lifetime = current_app.config.get('PERMANENT_SESSION_LIFETIME')
+        if isinstance(lifetime, timedelta):
+            return lifetime.total_seconds()
+        return float(lifetime or 86400)
+
+    def set(self, user_id, key):
+        token = self._f().encrypt(key.encode('utf-8'))
+        expires_at = time.time() + self._ttl_seconds()
+        with self._lock:
+            self._store[str(user_id)] = (token, expires_at)
+
+    def get(self, user_id):
+        sid = str(user_id)
+        with self._lock:
+            rec = self._store.get(sid)
+        if not rec:
+            return None
+        token, expires_at = rec
+        if time.time() > expires_at:
+            self.clear(user_id)
+            return None
+        try:
+            return self._f().decrypt(token).decode('utf-8')
+        except (InvalidToken, ValueError):
+            self.clear(user_id)
+            return None
+
+    def has(self, user_id):
+        return self.get(user_id) is not None
+
+    def clear(self, user_id):
+        with self._lock:
+            self._store.pop(str(user_id), None)
+
+
+grok_key_store = GrokKeyStore()
 
 
 def createApp():
@@ -99,6 +324,18 @@ def createApp():
     app.config['GROK_API_KEY_REQUIRED'] = True
     app.before_request(_csrf_protect)
     app.after_request(_csrf_set_cookie)
+    app.after_request(_security_headers)
+
+    # Install secret-redaction filter on the root logger and on the named
+    # WSGI loggers so application logs, werkzeug's request line, and gunicorn
+    # access/error output never carry an xAI key or Authorization header.
+    _install_log_scrubbing()
+
+    # Activate per-route rate limiting. The Limiter decorators on routes are
+    # a no-op until init_app() runs, which keeps the existing test apps that
+    # build their own Flask instance unaffected.
+    if limiter is not None:
+        limiter.init_app(app)
 
     # Database configuration
     db_config = {
@@ -120,15 +357,11 @@ def createApp():
     )
     Base.metadata.create_all(engine)
 
-    # Setup configuration and other necessary initializations here
-    # Configure OpenAI SDK to use xAI's Grok API
-    with app.app_context():
-        current_app.world_builder = None  # Store world_builder in the current_app context
-        # Create OpenAI client configured for xAI Grok API
-        current_app.openai = OpenAI(
-            api_key="placeholder",  # Will be set per request
-            base_url="https://api.x.ai/v1"
-        )
+    # Per-request OpenAI clients are constructed inside the routes that need
+    # them (see _make_gpt_service / initialize_world_building*) using the
+    # caller's Grok API key. No shared client lives on the app object: a
+    # single mutable client would race between concurrent requests carrying
+    # different keys.
 
     # Create a configured "Session" class
     Session = sessionmaker(bind=engine)

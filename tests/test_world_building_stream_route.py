@@ -82,8 +82,8 @@ def test_stream_emits_progress_and_complete_events(live_client, grok_api_key):
         data=json.dumps({
             'seed_id': 1,
             'seed_data': '{"theme": "fantasy"}',
-            'grok_api_key': grok_api_key,
         }),
+        headers={'X-Grok-API-Key': grok_api_key},
         content_type='application/json'
     )
 
@@ -119,8 +119,8 @@ def test_stream_emits_error_event_on_exception(mock_world_builder_cls, mock_open
         data=json.dumps({
             'seed_id': 2,
             'seed_data': '{}',
-            'grok_api_key': 'test-key'
         }),
+        headers={'X-Grok-API-Key': 'test-key'},
         content_type='application/json'
     )
 
@@ -148,8 +148,8 @@ def test_stream_cleans_up_progress_queue(mock_world_builder_cls, mock_openai_cls
         data=json.dumps({
             'seed_id': 3,
             'seed_data': '{}',
-            'grok_api_key': 'test-key'
         }),
+        headers={'X-Grok-API-Key': 'test-key'},
         content_type='application/json'
     )
     # Drain the response so the generator's finally block runs.

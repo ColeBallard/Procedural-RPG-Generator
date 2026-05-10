@@ -3,6 +3,13 @@ import { setLocalStorageItem, getLocalStorageItem } from './utils/storage.js';
 
 let narrativeTemplate;
 
+// HTML-escape arbitrary values before interpolating them into a string of
+// markup. Uses the standard jQuery text-then-html idiom so callers can keep
+// building markup with template literals without introducing XSS sinks.
+function escapeHtml(val) {
+    return $('<div>').text(val == null ? '' : String(val)).html();
+}
+
 // Read the double-submit CSRF cookie set by the server. Returned as-is and
 // echoed back in X-CSRF-Token on every state-changing request.
 function getCsrfToken() {
@@ -10,27 +17,43 @@ function getCsrfToken() {
     return match ? decodeURIComponent(match[1]) : '';
 }
 
-// Always pull the Grok key fresh from the input field (preferred) or
-// localStorage so AJAX requests reflect the latest user input without
-// requiring a page refresh.
-function getGrokApiKey() {
-    const fromInput = ($('#grok-api-key-input').val() || '').trim();
-    const fromStorage = (getLocalStorageItem('key-grok-xai') || '').trim();
-    return fromInput || fromStorage;
+// Cached "the server has a Grok key bound to my session" flag. The actual
+// key value is never held in the browser anymore: it's pushed once via
+// POST /api/grok-key after sign-in and lives in the server's encrypted
+// in-memory store keyed by user_id. refreshGrokKeyStatus() re-syncs this
+// flag from GET /api/grok-key and is called after login, after Save/Clear
+// in the API Keys view, and on page load.
+let _grokKeyAvailable = false;
+
+function hasGrokKey() {
+    return _grokKeyAvailable;
 }
 
-// Inject the CSRF and Grok-key headers on every jQuery ajax request. The
-// server ignores CSRF for safe methods, and only enforces the Grok key on
-// the routes that gate the game view.
+function refreshGrokKeyStatus() {
+    return $.ajax({ url: '/api/grok-key', type: 'GET' })
+        .then(function (response) {
+            _grokKeyAvailable = !!(response && response.present);
+            updateGameMenuButtonsState();
+            updateApiKeysViewStatus();
+            return _grokKeyAvailable;
+        })
+        .catch(function () {
+            _grokKeyAvailable = false;
+            updateGameMenuButtonsState();
+            updateApiKeysViewStatus();
+            return false;
+        });
+}
+
+// Inject the CSRF header on every jQuery ajax request. The Grok key is no
+// longer attached to outbound requests: gated routes pull it from the
+// server-side, session-scoped store. The server still ignores CSRF for
+// safe methods.
 $.ajaxSetup({
     beforeSend: function (xhr) {
         const token = getCsrfToken();
         if (token) {
             xhr.setRequestHeader('X-CSRF-Token', token);
-        }
-        const grokKey = getGrokApiKey();
-        if (grokKey) {
-            xhr.setRequestHeader('X-Grok-API-Key', grokKey);
         }
     }
 });
@@ -85,6 +108,9 @@ function showApp() {
     // Ensure header starts fully expanded when app is shown
     $('#app-header').removeClass('header-collapsed').css('margin-bottom', '').show();
     showMainMenu();
+    // Sync the cached "key configured server-side" flag so the menu gating
+    // and the API Keys view both reflect what the server actually has.
+    refreshGrokKeyStatus();
 }
 
 // Helper functions for view management
@@ -130,11 +156,11 @@ function showGameView() {
     $('#back-to-menu-btn').show();
 }
 
-// Game view requires a Grok (xAI) API key. Keys issued by xAI are
-// prefixed with "xai-".
+// Game view requires a Grok (xAI) API key bound to the server-side session.
+// The browser only knows whether one is configured (via /api/grok-key); the
+// actual key value lives in the server's encrypted in-memory store.
 function hasValidGrokApiKey() {
-    const key = getGrokApiKey();
-    return key.startsWith('xai-') && key.length > 4;
+    return hasGrokKey();
 }
 
 // Returns true when the gate is satisfied. Otherwise opens the API Key
@@ -146,13 +172,25 @@ function requireValidGrokApiKey() {
 }
 
 // Disable the menu entries that ultimately lead to the game view when no
-// valid Grok key is configured. Settings and API Keys remain reachable so
-// the user can supply a key.
+// Grok key is configured server-side. Settings and API Keys remain reachable
+// so the user can supply a key.
 function updateGameMenuButtonsState() {
     const enabled = hasValidGrokApiKey();
     $('#menu-resume-game-btn, #menu-new-game-btn, #menu-load-game-btn')
         .prop('disabled', !enabled)
         .attr('title', enabled ? '' : 'Add a valid xAI API key in the API Keys menu to enable.');
+}
+
+// Reflect the current key-configured state in the API Keys view: the
+// "Configured" badge appears when the server confirms a stored key, and the
+// Clear button is only enabled while one is present.
+function updateApiKeysViewStatus() {
+    const present = hasGrokKey();
+    $('#grok-api-key-status')
+        .text(present ? '✅ Key configured server-side' : '⚠️ No key configured')
+        .toggleClass('grok-key-status-ok', present)
+        .toggleClass('grok-key-status-missing', !present);
+    $('#clear-api-key-btn').prop('disabled', !present);
 }
 
 $(document).ready(function () {
@@ -259,6 +297,20 @@ $(document).ready(function () {
             url: '/auth/logout',
             type: 'POST',
             success: function() {
+                // Drop any leftover legacy cache and the active seed pointer
+                // so the next user on the same browser doesn't inherit them.
+                // The Grok key itself was already cleared server-side by the
+                // /auth/logout handler; we just reset the in-page flag so the
+                // menu gating reflects the new "no key" state.
+                try {
+                    localStorage.removeItem('key-grok-xai');
+                    localStorage.removeItem('current-seed-id');
+                } catch (_) { /* ignore storage errors */ }
+                $('#grok-api-key-input').val('');
+                _grokKeyAvailable = false;
+                updateGameMenuButtonsState();
+                updateApiKeysViewStatus();
+
                 showLandingPage();
                 // Clear forms
                 $('#signin-username').val('');
@@ -285,13 +337,23 @@ $(document).ready(function () {
         }
     });
 
-    // Loading API keys from local storage
-    const seedId = getLocalStorageItem('current-seed-id');
-    const savedGrokApiKey = getLocalStorageItem('key-grok-xai');
-
-    if (savedGrokApiKey) {
-        $("#grok-api-key-input").val(savedGrokApiKey);
-    }
+    // One-shot migration: if a previous build cached the Grok key in
+    // localStorage, push it to the new server-side store and wipe the
+    // browser copy. The key never lives in the DOM or localStorage again.
+    try {
+        const legacyKey = (localStorage.getItem('key-grok-xai') || '').trim();
+        if (legacyKey) {
+            $.ajax({
+                url: '/api/grok-key',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ api_key: legacyKey })
+            }).always(function () {
+                try { localStorage.removeItem('key-grok-xai'); } catch (_) {}
+                refreshGrokKeyStatus();
+            });
+        }
+    } catch (_) { /* ignore storage errors */ }
 
     // Main menu button handlers
     $('#menu-resume-game-btn').click(function (e) {
@@ -340,10 +402,49 @@ $(document).ready(function () {
         showMainMenu();
     });
 
+    // Save: push the key to the server-side store and wipe the input field.
+    // The key never lives in localStorage or the DOM longer than this call.
     $('#save-api-keys-btn').click(function (e) {
         e.preventDefault();
-        setLocalStorageItem('key-grok-xai', $("#grok-api-key-input").val());
-        updateGameMenuButtonsState();
+        const $input = $('#grok-api-key-input');
+        const $msg = $('#api-keys-message');
+        const apiKey = ($input.val() || '').trim();
+        if (!apiKey) {
+            $msg.text('Enter your xAI API key (starts with "xai-").').show();
+            return;
+        }
+        $msg.text('Saving...').show();
+        $.ajax({
+            url: '/api/grok-key',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ api_key: apiKey })
+        })
+            .done(function () {
+                $input.val('');
+                $msg.text('Key saved server-side for this session.').show();
+                refreshGrokKeyStatus();
+            })
+            .fail(function (xhr) {
+                const r = xhr.responseJSON;
+                $msg.text((r && r.message) || 'Failed to save API key.').show();
+            });
+    });
+
+    // Clear: remove the key from the server-side store. No browser-side
+    // state to wipe because the key was never cached locally.
+    $('#clear-api-key-btn').click(function (e) {
+        e.preventDefault();
+        const $msg = $('#api-keys-message');
+        $msg.text('Clearing...').show();
+        $.ajax({ url: '/api/grok-key', type: 'DELETE' })
+            .done(function () {
+                $msg.text('Key cleared.').show();
+                refreshGrokKeyStatus();
+            })
+            .fail(function () {
+                $msg.text('Failed to clear API key.').show();
+            });
     });
 
     // Confirmation modal handlers
@@ -482,21 +583,19 @@ $(document).ready(function () {
 
     async function executeWorldBuildingWithSSE(seedId, seedData) {
         return new Promise((resolve, reject) => {
-            // First, make a POST request to start the SSE stream. fetch()
-            // bypasses jQuery's ajaxSetup, so the Grok key header is set
-            // explicitly here to mirror the gating applied to $.ajax calls.
-            const grokApiKey = getGrokApiKey();
+            // POST to start the SSE stream. The Grok key is no longer
+            // attached here; the server pulls it from the session-scoped
+            // store. fetch() still needs the CSRF header set explicitly
+            // because it bypasses jQuery's ajaxSetup.
             fetch('/initialize_world_building_stream', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRF-Token': getCsrfToken(),
-                    'X-Grok-API-Key': grokApiKey
+                    'X-CSRF-Token': getCsrfToken()
                 },
                 body: JSON.stringify({
                     seed_id: seedId,
-                    seed_data: seedData,
-                    grok_api_key: grokApiKey
+                    seed_data: seedData
                 })
             })
             .then(response => {
@@ -577,7 +676,9 @@ $(document).ready(function () {
         });
     }
 
-    // Keep the old function as fallback
+    // Keep the old function as fallback. The Grok key rides on the
+    // X-Grok-API-Key header injected by $.ajaxSetup; it is never echoed
+    // into the request body.
     async function executeWorldBuilding(seedId, seedData) {
         return new Promise((resolve, reject) => {
             $.ajax({
@@ -586,8 +687,7 @@ $(document).ready(function () {
                 contentType: 'application/json',
                 data: JSON.stringify({
                     seed_id: seedId,
-                    seed_data: seedData,
-                    grok_api_key: getGrokApiKey()
+                    seed_data: seedData
                 }),
                 success: function (response) {
                     resolve(response);
@@ -783,7 +883,7 @@ $(document).ready(function () {
         const statByKey = {};
         (stats || []).forEach(s => { statByKey[s.id] = s.description; });
 
-        const escape = (val) => $('<div>').text(val == null ? '' : String(val)).html();
+        const escape = escapeHtml;
 
         const name = escape(mainCharacter.name || 'Unnamed Hero');
         const subtitleParts = [];
@@ -848,7 +948,7 @@ $(document).ready(function () {
     // appear above an empty list.
     function renderProfileEntryList(title, entries, itemClass) {
         const list = entries || [];
-        const escape = (val) => $('<div>').text(val == null ? '' : String(val)).html();
+        const escape = escapeHtml;
         let html = `<div class="profile-section-title">${escape(title)}</div>`;
         if (list.length === 0) {
             html += `<div class="profile-entry-empty">None</div>`;
@@ -902,12 +1002,18 @@ $(document).ready(function () {
                         'align-items': 'center', 'padding': '0.5rem 0',
                         'border-bottom': '1px solid rgba(255,255,255,0.1)'
                     });
-                    $row.append(
-                        $('<div>').html(
-                            `<strong>${charName}</strong><br>` +
-                            `<small>Seed #${s.seed_id} · Turn ${s.current_turn} · Created ${created}</small>`
+                    // Build the row with .text() on every user-derived field so a
+                    // crafted main_character_name (or any future field) cannot inject
+                    // markup into the saved-games list.
+                    const $info = $('<div>');
+                    $info.append($('<strong>').text(charName));
+                    $info.append('<br>');
+                    $info.append(
+                        $('<small>').text(
+                            `Seed #${s.seed_id} · Turn ${s.current_turn} · Created ${created}`
                         )
                     );
+                    $row.append($info);
                     const $btn = $('<button>').addClass('btn btn-primary').text('Load').click(function () {
                         if (!requireValidGrokApiKey()) return;
                         setLocalStorageItem('current-seed-id', s.seed_id);
@@ -1118,19 +1224,20 @@ $(document).ready(function () {
         $('#status-message').html('🔮 Analyzing image and generating stereotypical build...');
         $('#analyze-stereotype-btn').prop('disabled', true);
 
-        // Send image to backend for analysis
+        // Send image to backend for analysis. The Grok key rides on the
+        // X-Grok-API-Key header injected by $.ajaxSetup; it is never echoed
+        // into the request body.
         $.ajax({
             url: '/analyze_stereotype',
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({
-                image_data: uploadedImageData,
-                grok_api_key: getGrokApiKey()
+                image_data: uploadedImageData
             }),
             success: function(response) {
                 if (response.success) {
                     stereotypeGeneratedBuild = response.build;
-                    $('#status-message').html('✅ Analysis complete!');
+                    $('#status-message').text('✅ Analysis complete!');
 
                     // Display the generated build
                     $('#stereotype-result').show();
@@ -1140,40 +1247,45 @@ $(document).ready(function () {
                         $('#stereotype-status').hide();
                     }, 2000);
                 } else {
-                    $('#status-message').html('❌ Error: ' + response.message);
+                    // Error message comes from the server (and may echo crafted
+                    // input from the LLM response); render as text to keep it
+                    // out of the HTML parser.
+                    $('#status-message').text('❌ Error: ' + response.message);
                 }
                 $('#analyze-stereotype-btn').prop('disabled', false);
             },
             error: function(xhr) {
                 const errorMsg = xhr.responseJSON?.message || 'Failed to analyze image';
-                $('#status-message').html('❌ Error: ' + errorMsg);
+                $('#status-message').text('❌ Error: ' + errorMsg);
                 $('#analyze-stereotype-btn').prop('disabled', false);
             }
         });
     });
 
-    // Format stereotype build for display
+    // Format stereotype build for display. Every build.* field is escaped
+    // because the values come from the LLM response and can therefore contain
+    // arbitrary HTML / script payloads.
     function formatStereotypeBuild(build) {
         let html = '<div class="build-details">';
 
         if (build.description) {
-            html += `<p><strong>Description:</strong> ${build.description}</p>`;
+            html += `<p><strong>Description:</strong> ${escapeHtml(build.description)}</p>`;
         }
 
         if (build.character_name) {
-            html += `<p><strong>Character Name:</strong> ${build.character_name}</p>`;
+            html += `<p><strong>Character Name:</strong> ${escapeHtml(build.character_name)}</p>`;
         }
 
         if (build.character_age) {
-            html += `<p><strong>Age:</strong> ${build.character_age}</p>`;
+            html += `<p><strong>Age:</strong> ${escapeHtml(build.character_age)}</p>`;
         }
 
         if (build.character_gender) {
-            html += `<p><strong>Gender:</strong> ${build.character_gender}</p>`;
+            html += `<p><strong>Gender:</strong> ${escapeHtml(build.character_gender)}</p>`;
         }
 
         if (build.story_inspiration) {
-            html += `<p><strong>Story Theme:</strong> ${build.story_inspiration}</p>`;
+            html += `<p><strong>Story Theme:</strong> ${escapeHtml(build.story_inspiration)}</p>`;
         }
 
         html += '</div>';
