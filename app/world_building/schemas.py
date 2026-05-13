@@ -209,9 +209,9 @@ class TurnNewCharacterOut(_CharacterCoreMixin):
 
 
 class ActionAdjudicationOut(BaseModel):
-    """DM ruling on a player action: DC, ability, time cost, brief rationale.
+    """Arbiter ruling on a player action: DC, ability, time cost, brief rationale.
 
-    Returned by the ``DM_ADJUDICATE`` prompt before the narrator continues
+    Returned by the ``ARBITER_ADJUDICATE`` prompt before the narrator continues
     the story. ``requires_check`` is False for routine actions (looking
     around, casual remarks, walking a few paces) so the substrate skips
     the dice and treats the action as a guaranteed success. When True,

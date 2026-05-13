@@ -642,24 +642,42 @@ button:disabled, .btn:disabled {
     text-decoration: none;
 }
 
-.suggestions-label {
+/* Travel destinations and Suggested actions share one panel below the
+   narrative. Two tabs sit side by side; clicking one activates its list,
+   clicking the active tab collapses both. main.js drives visibility via
+   refreshActionPanels()/setActivePanel(). */
+.action-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 0.25rem 0 0.5rem;
+}
+
+.action-tab {
     display: inline-flex;
     align-items: center;
+    margin-top: 0;
+    margin-bottom: 0;
     gap: 0.4rem;
+    font-family: inherit;
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-muted);
-    margin: 0.25rem 0 0.5rem;
     padding: 0.15rem 0.25rem;
     font-weight: 600;
     background: none;
     border: none;
     cursor: pointer;
     box-shadow: none;
+    transition: color var(--transition-fast);
 }
 
-.suggestions-label:hover {
+.action-tab:hover {
+    color: var(--text-primary);
+}
+
+.action-tab.active {
     color: var(--text-primary);
 }
 
@@ -670,28 +688,34 @@ button:disabled, .btn:disabled {
     transition: transform var(--transition-fast);
 }
 
-#suggestions-section.collapsed .suggestions-toggle-icon {
+.action-tab:not(.active) .suggestions-toggle-icon {
     transform: rotate(-90deg);
 }
 
-#suggestions-section.collapsed #optionsList {
-    display: none;
+.action-panel {
+    margin: 0 0 0.75rem 0;
 }
 
-#optionsList {
+.action-list {
     list-style: none;
     padding: 0;
-    margin: 0.25rem 0 0.75rem;
+    margin: 0;
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
 }
 
-#optionsList .nav-item {
+.action-list .nav-item {
     margin: 0;
 }
 
-#optionsList .btn-link {
+/* Both lists share the suggested-actions button look so the two surfaces
+   feel like the same control. */
+#optionsList .btn-link,
+.travel-destination-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
     width: auto;
     text-align: left;
     background-color: var(--bg-card);
@@ -703,13 +727,16 @@ button:disabled, .btn:disabled {
     font-size: 0.82rem;
     font-weight: 500;
     line-height: 1.3;
+    cursor: pointer;
     transition: all var(--transition-fast);
 }
 
-#optionsList .btn-link:hover {
+#optionsList .btn-link:hover,
+.travel-destination-btn:hover {
     background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
     border-color: var(--primary-light);
     color: white;
+    text-decoration: none;
     box-shadow: var(--shadow-md);
 }
 
@@ -2913,40 +2940,74 @@ textarea {
 /* Sits inline with the Narrative title; renderClock() in main.js toggles
    the [hidden] attribute when no clock is available so the badge stays
    out of the way during world-build. The time-of-day suffix uses a
-   colour ramp to give the player a quick at-a-glance read. */
+   colour ramp to give the player a quick at-a-glance read. The icon
+   element is swapped per-bucket by renderClock() so the glyph itself
+   tracks dawn → night without needing extra DOM. */
 .world-clock {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.6rem;
     margin-left: auto;
     margin-right: 1rem;
-    padding: 0.25rem 0.6rem;
-    background: linear-gradient(135deg, rgba(15, 23, 42, 0.85), rgba(2, 6, 23, 0.85));
+    padding: 0.35rem 0.55rem 0.35rem 0.7rem;
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.92));
     border: 1px solid var(--border-light);
-    border-radius: 0.5rem;
+    border-radius: 0.6rem;
     font-family: 'Cinzel', serif;
-    font-size: 0.85rem;
-    font-weight: 600;
     color: var(--text-primary);
-    letter-spacing: 0.04em;
     box-shadow: var(--shadow-sm);
     transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .world-clock[hidden] { display: none; }
 
-.world-clock-icon { font-size: 1rem; line-height: 1; }
-.world-clock-display { white-space: nowrap; }
+.world-clock-icon {
+    font-size: 1.35rem;
+    line-height: 1;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
+.world-clock-stack {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    line-height: 1.05;
+    padding-right: 0.55rem;
+    border-right: 1px solid var(--border-light);
+}
+
+.world-clock-date {
+    font-size: 0.65rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.world-clock-time {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+    margin-top: 0.1rem;
+}
 
 .world-clock-tod {
     text-transform: uppercase;
-    font-size: 0.7rem;
-    padding: 0.1rem 0.4rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
     border-radius: 999px;
     background: rgba(99, 102, 241, 0.2);
     border: 1px solid rgba(99, 102, 241, 0.4);
     color: var(--text-secondary);
-    letter-spacing: 0.08em;
+    letter-spacing: 0.12em;
+    white-space: nowrap;
+}
+
+.world-clock-tod:empty {
+    display: none;
 }
 
 .world-clock[data-tod="dawn"] .world-clock-tod,
@@ -2981,57 +3042,11 @@ textarea {
 
 
 /* ===== TRAVEL PANEL ===== */
-/* Sits between the Narrative output and the suggestions list inside
-   #user-options. renderTravelPanel() in main.js toggles [hidden] when
-   there are no destinations (world-build phase or a stranded MC). */
-.travel-section {
-    margin: 0.5rem 0 0.6rem 0;
-    padding: 0.4rem 0.5rem;
-    background: rgba(15, 23, 42, 0.55);
-    border: 1px solid var(--border-light);
-    border-radius: 0.4rem;
-}
-
-.travel-section[hidden] { display: none; }
-
-.travel-section .suggestions-label {
-    font-family: 'Cinzel', serif;
-    font-size: 0.85rem;
-    color: var(--text-secondary);
-}
-
+/* Travel-specific accents that layer on top of the shared action-list
+   button styling defined in the Action Tabs/Panel section above. */
 #travel-current-name {
     color: var(--primary-light);
     font-weight: 700;
-}
-
-#travel-destinations {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-    margin: 0.4rem 0 0 0;
-    padding: 0;
-    list-style: none;
-}
-
-.travel-destination-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.25rem 0.55rem;
-    background: rgba(99, 102, 241, 0.12);
-    border: 1px solid rgba(99, 102, 241, 0.4);
-    border-radius: 999px;
-    color: var(--text-primary);
-    font-size: 0.82rem;
-    cursor: pointer;
-    transition: background var(--transition-fast),
-                border-color var(--transition-fast);
-}
-
-.travel-destination-btn:hover {
-    background: rgba(99, 102, 241, 0.25);
-    border-color: rgba(99, 102, 241, 0.7);
 }
 
 .travel-destination-btn:disabled {
@@ -3045,23 +3060,27 @@ textarea {
     color: var(--text-secondary);
 }
 
+.travel-destination-btn:hover .travel-cost {
+    color: rgba(255, 255, 255, 0.85);
+}
+
 
 /* ===== TRANSCRIPT KIND STYLING (Phase 6 polish) ===== */
-/* DM ruling lines (kind=dm) and dice rolls (kind=dice) deserve their own
-   visual treatment so players parse "this is a mechanical beat" at a
-   glance. The dm row reads as a brief, italic side-note in the secondary
-   accent; the dice row uses a monospaced d20-style chip on the left so
-   it visually reads like a roll result strip. ``narrative-system`` rows
-   carry the off-screen "[News from afar]" gossip emitted by the
+/* Arbiter ruling lines (kind=arbiter) and dice rolls (kind=dice) deserve
+   their own visual treatment so players parse "this is a mechanical beat"
+   at a glance. The arbiter row reads as a brief, italic side-note in the
+   secondary accent; the dice row uses a monospaced d20-style chip on the
+   left so it visually reads like a roll result strip. ``narrative-system``
+   rows carry the off-screen "[News from afar]" gossip emitted by the
    autonomous world simulator and get a parchment tint to set them apart
    from the main scene. */
-#narrativeList .narrative-dm {
+#narrativeList .narrative-arbiter {
     border-left-color: var(--secondary-color);
     background-color: rgba(99, 102, 241, 0.08);
     font-style: italic;
     font-size: 0.95em;
 }
-#narrativeList .narrative-dm .narrative-speaker {
+#narrativeList .narrative-arbiter .narrative-speaker {
     color: var(--secondary-color);
     font-variant: small-caps;
     letter-spacing: 0.06em;

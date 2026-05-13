@@ -1,13 +1,13 @@
 CONDENSE = "Condense the following text to make it more concise:\n\n{}"
 
-# Dungeon Master adjudication prompt. Run BEFORE the per-turn narration so
+# Arbiter adjudication prompt. Run BEFORE the per-turn narration so
 # the substrate can decide whether the action is auto-success or needs a
 # dice check, what the difficulty is, and how much in-world time it eats.
 # The narration call (CONTINUE_NARRATIVE) then receives the outcome and
 # describes it to the player. Keeping this a separate, tiny call lets the
-# DM lean on the cheaper model and saves prompt budget on routine beats.
-DM_ADJUDICATE = (
-    "You are the Dungeon Master of a text-based RPG, ruling on whether a "
+# arbiter lean on the cheaper model and saves prompt budget on routine beats.
+ARBITER_ADJUDICATE = (
+    "You are the Arbiter of a text-based RPG, ruling on whether a "
     "player's declared action needs a dice check before it resolves. "
     "Output a single JSON object describing the ruling.\n\n"
     "Player character:\n{character}\n\n"
@@ -126,6 +126,79 @@ SCENARIO_PROMPTS = {
         "and clearly outmatched. Return a single JSON object: "
         "{{\"verb\": \"...\", \"flavour\": \"<one short sentence describing "
         "the action in-fiction>\"}}.\n"
+        "Output JSON only."
+    ),
+    'BATTLE_SUGGEST_ACTIONS': (
+        "You are coaching the player of a text-based RPG mid-combat. Propose "
+        "ONE concrete tactic for each of the three categories: attack, defend, "
+        "flee. Each tactic must be a single short imperative phrase (4-12 "
+        "words) the player could speak aloud, written in second-person, and "
+        "grounded in the player's actual inventory + the current situation.\n\n"
+        "Player: {player_name}\n{player_profile}\n"
+        "Player HP: {player_hp}/{player_max_hp}\n"
+        "Player inventory:\n{player_inventory}\n\n"
+        "Opponent: {opponent_name}\n{opponent_profile}\n"
+        "Opponent HP: {opponent_hp}/{opponent_max_hp}\n\n"
+        "Recent combat log (oldest first):\n{history}\n\n"
+        "Suggestion rules:\n"
+        "  - 'attack' MUST reference a weapon or strike fitting the inventory "
+        "(e.g. 'Slash for the throat with your iron sword'). When the player "
+        "carries no weapon, propose an unarmed or improvised strike.\n"
+        "  - 'defend' MUST reference a shield, armor piece, or stance fitting "
+        "the inventory (e.g. 'Raise your wooden shield to block the next "
+        "blow'). When no defensive gear is on hand, suggest a dodge or duck.\n"
+        "  - 'flee' MUST reference a plausible escape grounded in the "
+        "situation (e.g. 'Bolt down the alley while they reload'). Mention "
+        "terrain or opponent state, not just 'run away'.\n"
+        "  - 'hint' is OPTIONAL: one short clause (<= 8 words) explaining why "
+        "this tactic fits. Empty string when there's nothing to add.\n\n"
+        "Return a single JSON object: "
+        "{{\"attack\": {{\"text\": \"...\", \"hint\": \"...\"}}, "
+        "\"defend\": {{\"text\": \"...\", \"hint\": \"...\"}}, "
+        "\"flee\": {{\"text\": \"...\", \"hint\": \"...\"}}}}.\n"
+        "Output JSON only."
+    ),
+    'BATTLE_ADJUDICATE_ACTION': (
+        "You are the Arbiter of a text-based RPG ruling on a player's combat "
+        "action. Pick the ability + DC + modifiers that best model how hard "
+        "the action is to pull off RIGHT NOW given the situation, and "
+        "describe both the successful and failed outcome in one short clause "
+        "each.\n\n"
+        "Player: {player_name}\n{player_profile}\n"
+        "Player HP: {player_hp}/{player_max_hp}\n"
+        "Player inventory:\n{player_inventory}\n\n"
+        "Opponent: {opponent_name}\n{opponent_profile}\n"
+        "Opponent HP: {opponent_hp}/{opponent_max_hp}\n"
+        "Opponent guarding: {opponent_guarding}\n\n"
+        "Recent combat log (oldest first):\n{history}\n\n"
+        "Player's declared action ({verb}): \"{player_text}\"\n\n"
+        "Rules:\n"
+        "  - 'ability' MUST be one of: 'strength', 'speed', 'agility', "
+        "'intelligence', 'wisdom', 'charisma'. Pick what the action actually "
+        "tests (a sword swing for the head -> strength; a shield block -> "
+        "strength or agility; a feint -> charisma; a sprint to flee -> "
+        "speed).\n"
+        "  - 'dc' MUST be one of 5 (trivial), 10 (easy), 15 (medium), 20 "
+        "(hard), 25 (very hard), 30 (nearly impossible). Pick by fictional "
+        "difficulty: a basic stab with a held weapon is easy/medium; a "
+        "called shot to a vital area is hard; threading a crowd to flee is "
+        "medium.\n"
+        "  - 'proficient' is true when the player's gear/background "
+        "plausibly covers the action (e.g. holding the weapon they're "
+        "swinging).\n"
+        "  - 'advantage' / 'disadvantage' apply when the situation clearly "
+        "helps or hinders (opponent guarding -> disadvantage on attack; "
+        "opponent wounded and slow -> advantage). Both off by default.\n"
+        "  - 'damage_bonus' (attack only; 0 otherwise) is a small signed "
+        "integer in -2..+6 representing the weapon's edge. Bare hands = 0; "
+        "a club = +1; a sword/axe = +2..+3; a polearm or two-handed weapon "
+        "= +3..+5. Never exceed +6.\n"
+        "  - 'flavour' is ONE short in-fiction sentence describing the "
+        "successful outcome (used when the dice land in the player's favour).\n"
+        "  - 'miss_flavour' is ONE short sentence describing the failed "
+        "attempt (used when the dice don't favour the player).\n\n"
+        "Return a single JSON object with keys: ability, dc, proficient, "
+        "advantage, disadvantage, damage_bonus, flavour, miss_flavour.\n"
         "Output JSON only."
     ),
     'TRADE_HAGGLE': (
@@ -437,11 +510,11 @@ WORLD_BUILDING = {
         "{recent_events}\n\n"
         "Recent transcript (oldest first):\n{transcript}\n\n"
         "Player's latest action:\n{player_action}\n\n"
-        "Dungeon Master ruling on this action (already resolved by the "
+        "Arbiter ruling on this action (already resolved by the "
         "system; honour it exactly -- do not change the verdict, do not "
-        "ask for another check, do not invent dice):\n{dm_outcome}\n\n"
+        "ask for another check, do not invent dice):\n{arbiter_outcome}\n\n"
         "Output JSON only. The world clock has already advanced by the "
-        "DM's adjudicated time cost; do NOT include 'time_cost_minutes' "
+        "Arbiter's adjudicated time cost; do NOT include 'time_cost_minutes' "
         "in your response.\n"
     ),
     'SUGGEST_ACTIONS': (

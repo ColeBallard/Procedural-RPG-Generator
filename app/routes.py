@@ -32,7 +32,7 @@ from app.services.gpt_service import GPTService
 from app.services.name_service import NameService
 from app.world_building.world_building import WorldBuilder
 from app.world_building.schemas import TurnResponseOut, ActionAdjudicationOut
-from app.prompt_templates import STEREOTYPE_ANALYSIS, WORLD_BUILDING, DM_ADJUDICATE
+from app.prompt_templates import STEREOTYPE_ANALYSIS, WORLD_BUILDING, ARBITER_ADJUDICATE
 from app import scenarios as _scenarios
 
 # Rate limiter is initialised in createApp(); when it isn't available (the
@@ -1162,18 +1162,18 @@ def _resolve_dialogue_speaker(db_session, seed_id, raw_speaker, name_lookup):
     return name_lookup.get(cleaned.lower(), cleaned)
 
 
-def _dm_adjudicate(gpt_service, context):
-    """Run the DM ruling pass on the player's action.
+def _arbiter_adjudicate(gpt_service, context):
+    """Run the Arbiter ruling pass on the player's action.
 
     Returns ``(ruling, error)`` where ``ruling`` is an
     ``ActionAdjudicationOut`` (or a fallback no-check ruling on parse
     failure) and ``error`` is a human string when the call itself blew
     up. Failure is non-fatal: the turn proceeds as a free auto-success
-    when the DM cannot be reached so a flaky model does not strand the
+    when the Arbiter cannot be reached so a flaky model does not strand the
     player.
     """
     try:
-        prompt = DM_ADJUDICATE.format(**context)
+        prompt = ARBITER_ADJUDICATE.format(**context)
         ruling = gpt_service.get_structured(
             prompt, ActionAdjudicationOut,
             max_attempts=2, temperature=0.3,
@@ -1181,12 +1181,12 @@ def _dm_adjudicate(gpt_service, context):
     except Exception as e:
         return _default_ruling(), str(e)
     if ruling is None:
-        return _default_ruling(), 'DM returned an invalid payload.'
+        return _default_ruling(), 'Arbiter returned an invalid payload.'
     return ruling, None
 
 
 def _default_ruling():
-    """Auto-success ruling used when the DM call fails or is skipped."""
+    """Auto-success ruling used when the Arbiter call fails or is skipped."""
     return ActionAdjudicationOut(
         requires_check=False, ability='strength', dc=10,
         proficient=False, advantage=False, disadvantage=False,
@@ -1196,7 +1196,7 @@ def _default_ruling():
 
 def _resolve_check(db_session, seed_id, character, ruling, *,
                    session_factory, current_turn):
-    """Roll the check the DM asked for and persist DM + dice transcript lines.
+    """Roll the check the Arbiter asked for and persist Arbiter + dice transcript lines.
 
     Returns ``(check_result, transcript_entries)`` where ``check_result``
     is a ``CheckResult`` (or ``None`` when the ruling didn't ask for a
@@ -1204,14 +1204,14 @@ def _resolve_check(db_session, seed_id, character, ruling, *,
     entries to surface to the frontend in the turn response.
     """
     entries = []
-    # DM ruling line first so the player sees WHY a roll is happening
+    # Arbiter ruling line first so the player sees WHY a roll is happening
     # before they see the dice land. Empty reasons are skipped.
     reason = (ruling.reason or '').strip()
     if reason:
-        dm_entry = transcript_service.add_entry(
+        arbiter_entry = transcript_service.add_entry(
             session_factory, seed_id,
-            transcript_service.KIND_DM, reason,
-            turn=current_turn, speaker='DM',
+            transcript_service.KIND_ARBITER, reason,
+            turn=current_turn, speaker='Arbiter',
             meta={
                 'requires_check': bool(ruling.requires_check),
                 'ability': ruling.ability,
@@ -1222,11 +1222,11 @@ def _resolve_check(db_session, seed_id, character, ruling, *,
                 'time_cost_minutes': int(ruling.time_cost_minutes or 0),
             },
         )
-        if dm_entry is not None:
+        if arbiter_entry is not None:
             entries.append({
-                'id': dm_entry.id,
-                'kind': transcript_service.KIND_DM,
-                'speaker': 'DM',
+                'id': arbiter_entry.id,
+                'kind': transcript_service.KIND_ARBITER,
+                'speaker': 'Arbiter',
                 'text': reason,
             })
     if not ruling.requires_check or character is None:
@@ -1242,14 +1242,14 @@ def _resolve_check(db_session, seed_id, character, ruling, *,
     dice_entry = transcript_service.add_entry(
         session_factory, seed_id,
         transcript_service.KIND_DICE, line,
-        turn=current_turn, speaker='DM',
+        turn=current_turn, speaker='Arbiter',
         meta=result.to_meta(),
     )
     if dice_entry is not None:
         entries.append({
             'id': dice_entry.id,
             'kind': transcript_service.KIND_DICE,
-            'speaker': 'DM',
+            'speaker': 'Arbiter',
             'text': line,
             # Forward the structured roll so the frontend can flash the
             # d20 overlay with the actual face / verdict / colour ramp
@@ -1259,8 +1259,8 @@ def _resolve_check(db_session, seed_id, character, ruling, *,
     return result, entries
 
 
-def _format_dm_outcome(ruling, check_result):
-    """Render the DM ruling + dice verdict as a short brief for the narrator.
+def _format_arbiter_outcome(ruling, check_result):
+    """Render the Arbiter ruling + dice verdict as a short brief for the narrator.
 
     Kept terse so the narration prompt stays cheap. The narrator reads
     this and is instructed to honour the verdict verbatim -- no second
@@ -1357,16 +1357,16 @@ def submit_turn(seed_id):
 
         gpt_service = _make_gpt_service()
 
-        # Phase 3: DM adjudication runs FIRST. The DM picks an ability +
-        # DC + time cost, the substrate rolls the dice deterministically,
-        # and the verdict is then handed to the narrator so the prose
-        # always matches the mechanical result. Both the DM ruling line
-        # and the dice roll land in the transcript ahead of the
-        # narration so the player sees them in the order they happened.
-        ruling, ruling_err = _dm_adjudicate(gpt_service, context)
+        # Phase 3: Arbiter adjudication runs FIRST. The Arbiter picks an
+        # ability + DC + time cost, the substrate rolls the dice
+        # deterministically, and the verdict is then handed to the narrator
+        # so the prose always matches the mechanical result. Both the
+        # Arbiter ruling line and the dice roll land in the transcript ahead
+        # of the narration so the player sees them in the order they happened.
+        ruling, ruling_err = _arbiter_adjudicate(gpt_service, context)
         if ruling_err:
             current_app.logger.warning(
-                "DM adjudication fell back to auto-success on seed %s: %s",
+                "Arbiter adjudication fell back to auto-success on seed %s: %s",
                 seed_id, ruling_err,
             )
         main_character = (
@@ -1375,11 +1375,11 @@ def submit_turn(seed_id):
                     Character.main_character == True)  # noqa: E712
             .first()
         )
-        check_result, dm_entries = _resolve_check(
+        check_result, arbiter_entries = _resolve_check(
             db_session, seed_id, main_character, ruling,
             session_factory=session_factory, current_turn=turn,
         )
-        context['dm_outcome'] = _format_dm_outcome(ruling, check_result)
+        context['arbiter_outcome'] = _format_arbiter_outcome(ruling, check_result)
 
         narration_prompt = WORLD_BUILDING['CONTINUE_NARRATIVE'].format(**context)
         try:
@@ -1394,9 +1394,9 @@ def submit_turn(seed_id):
                             'message': 'Narration failed: invalid LLM payload.'}), 502
 
         narration = (turn_payload.narration or '').strip()
-        # DM ruling + dice entries come first so they precede the
+        # Arbiter ruling + dice entries come first so they precede the
         # narration in the transcript order the frontend renders.
-        entries = list(dm_entries)
+        entries = list(arbiter_entries)
 
         # 1) Newly introduced characters land first so dialogue lines that
         # reference them resolve to the correct (just-created) Character row.
@@ -1494,10 +1494,10 @@ def submit_turn(seed_id):
 
         # Bump the turn counter only after a successful narration so failed
         # turns can be retried without skipping ahead. The world clock
-        # advances by the DM's adjudicated cost (the DM is the source of
-        # truth for time); the narrator no longer estimates time itself.
-        # Falls back to the default per-turn pace if the DM's value is
-        # missing or non-positive so the clock keeps ticking either way.
+        # advances by the Arbiter's adjudicated cost (the Arbiter is the
+        # source of truth for time); the narrator no longer estimates time
+        # itself. Falls back to the default per-turn pace if the Arbiter's
+        # value is missing or non-positive so the clock keeps ticking either way.
         seed.current_turn = turn + 1
         time_cost = int(getattr(ruling, 'time_cost_minutes', 0) or 0)
         if time_cost <= 0:
@@ -1540,6 +1540,7 @@ def submit_turn(seed_id):
                         db_session, seed_id, trigger,
                         current_turn=seed.current_turn,
                         session_factory=session_factory,
+                        gpt_service=gpt_service,
                     )
                 except Exception as e:
                     db_session.rollback()
@@ -1598,7 +1599,7 @@ def submit_travel(seed_id):
     Body: ``{"destination_id": <int>}``. The destination must appear in
     ``travel_service.reachable_destinations`` for the MC's current
     location -- arbitrary teleporting is rejected. The world clock is
-    bumped by the deterministic ``travel_minutes`` cost (no DM call,
+    bumped by the deterministic ``travel_minutes`` cost (no arbiter call,
     no narration round-trip; this is the cheap, predictable path), and
     a transcript line lands describing the trip so the next narration /
     suggestion call has the move in its history.

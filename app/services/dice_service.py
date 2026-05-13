@@ -2,7 +2,7 @@
 
 Pure functions only: every call is deterministic given a ``Random``
 instance, which makes the unit tests trivial and keeps the rest of the
-codebase from having to mock the standard library. The DM-adjudication
+codebase from having to mock the standard library. The arbiter-adjudication
 loop in ``app/routes.py`` calls ``perform_check`` after the LLM picks
 the ability and DC; combat, scenarios, and travel hook in the same way
 when they need a check rather than a flat outcome.
@@ -32,8 +32,8 @@ ABILITIES = (
     'strength', 'speed', 'agility', 'intelligence', 'wisdom', 'charisma',
 )
 
-# Difficulty class ladder borrowed from the DMG. The DM prompt is told
-# to pick from this list so the LLM doesn't drift into wild numbers.
+# Difficulty class ladder borrowed from the d20 SRD. The arbiter prompt is
+# told to pick from this list so the LLM doesn't drift into wild numbers.
 DC_LADDER = {
     'trivial': 5,
     'easy': 10,

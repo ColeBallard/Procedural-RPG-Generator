@@ -3,7 +3,7 @@
 The game's narrative is turn-based but the underlying world is
 time-based: every action carries a minute cost so two characters in
 different places can be reasoned about on the same shared clock. The
-DM-adjudication loop attaches a ``time_cost_minutes`` to each player
+arbiter-adjudication loop attaches a ``time_cost_minutes`` to each player
 action and passes it to ``advance_time`` after the action resolves;
 travel and scenarios do the same when they consume time.
 
@@ -19,7 +19,7 @@ from typing import Optional
 
 # Sensible defaults so the rest of the codebase has a single place to
 # look up "how much time does X take" without baking magic numbers into
-# scattered call sites. The DM may override on a per-action basis.
+# scattered call sites. The arbiter may override on a per-action basis.
 DEFAULT_TURN_MINUTES = 5
 DEFAULT_TRAVEL_MINUTES_PER_KM = 12   # ~5 km/h walking pace
 DEFAULT_REST_MINUTES = 60

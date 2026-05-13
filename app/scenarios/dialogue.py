@@ -62,7 +62,7 @@ class DialogueHandler(ScenarioHandler):
     # ----- substrate hooks --------------------------------------------------
 
     def start(self, db_session, seed_id, trigger, *, current_turn=None,
-              session_factory=None):
+              session_factory=None, gpt_service=None):
         from app.orm import Scenario  # local import to avoid cycles
         npcs = lookup_characters_by_name(db_session, seed_id, trigger.participants)
         if not npcs:

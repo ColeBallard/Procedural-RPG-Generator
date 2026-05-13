@@ -420,7 +420,7 @@ class ScenarioParticipant(Base):
     __tablename__ = 'ScenarioParticipants'
     id = Column(UnsignedInt, primary_key=True, autoincrement=True)
     scenario_id = Column(UnsignedInt, ForeignKey('Scenarios.id'), nullable=False)
-    character_id = Column(Integer, ForeignKey('Characters.id'), nullable=False)
+    character_id = Column(UnsignedInt, ForeignKey('Characters.id'), nullable=False)
     role = Column(String(32), nullable=False, default='participant')
     order_index = Column(SmallInteger, default=0)
     created_at = Column(DateTime, default=datetime.now)

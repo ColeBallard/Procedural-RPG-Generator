@@ -159,12 +159,14 @@ class ScenarioHandler(ABC):
 
     @abstractmethod
     def start(self, db_session, seed_id, trigger, *, current_turn=None,
-              session_factory=None):
+              session_factory=None, gpt_service=None):
         """Create the Scenario row + participants for ``trigger``.
 
         Returns the freshly persisted ``Scenario``, or ``None`` when the
         trigger is unusable (e.g. no resolvable participants). Implementations
-        commit through the supplied session.
+        commit through the supplied session. ``gpt_service`` is optional;
+        handlers that need a model-driven warm-up (e.g. battle suggesting
+        opening tactics) read it here, others ignore it.
         """
 
     @abstractmethod

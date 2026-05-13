@@ -30,7 +30,7 @@ from app.services import time_service
 UNITS_PER_KM = 0.01
 
 # Time cost (minutes) to walk between two sub-locations sharing a parent.
-# A short in-settlement stroll; the DM can override per-action.
+# A short in-settlement stroll; the arbiter can override per-action.
 INTRA_SETTLEMENT_MINUTES = 10
 
 # Multiplier on the base walking pace per terrain type. Anything missing

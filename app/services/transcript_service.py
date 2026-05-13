@@ -32,9 +32,9 @@ KIND_QUEST = 'quest'
 # Player-visible dice rolls (skill checks, saving throws). ``meta`` carries
 # the structured CheckResult (see app/services/dice_service.py).
 KIND_DICE = 'dice'
-# DM ruling line that precedes a dice roll: which ability, the DC, and a
-# short rationale. Lets the player see why the check is being asked.
-KIND_DM = 'dm'
+# Arbiter ruling line that precedes a dice roll: which ability, the DC,
+# and a short rationale. Lets the player see why the check is being asked.
+KIND_ARBITER = 'arbiter'
 
 
 def add_entry(

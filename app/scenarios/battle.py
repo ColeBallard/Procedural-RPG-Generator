@@ -1,4 +1,4 @@
-"""Battle scenario: deterministic, turn-based 1v1 combat.
+"""Battle scenario: turn-based 1v1 combat with LLM-coached tactics.
 
 State shape::
 
@@ -10,16 +10,25 @@ State shape::
         "max_hp": {<character_id>: <int>},
         "guarding": {<character_id>: <bool>},  # halves next incoming attack
         "log": [{"actor": <name>, "verb": "...", "text": "..."}, ...],
+        "suggestions": {                       # set when the LLM is available
+            "attack": {"text": "...", "hint": "..."},
+            "defend": {"text": "...", "hint": "..."},
+            "flee":   {"text": "...", "hint": "..."},
+        },
     }
 
-Verbs accepted via ``apply_action``::
+Actions accepted via ``apply_action``::
 
-    {"verb": "attack" | "defend" | "flee"}
+    {"verb": "attack" | "defend" | "flee", "text": "<player declaration>"}
 
-The combat math is intentionally deterministic so the scenario plays the
-same with or without an LLM; the LLM is only consulted for the NPC's
-choice of verb and a one-line flavour string. If the LLM is missing or
-fails, the NPC falls back to a stat-driven heuristic.
+When ``text`` is supplied AND a ``gpt_service`` is wired in, the handler
+asks the LLM to adjudicate the declared tactic (ability, DC, weapon
+bonus, advantage/disadvantage, narration), then resolves it via a real
+``dice_service`` ability check. When ``text`` is omitted (or no LLM is
+available) the verb falls back to the deterministic legacy path: STR + d6
+damage, half-on-guard, instant flee. The NPC's turn always uses the
+heuristic / LLM-picked verb path -- the LLM-coached UI is for the player
+only.
 """
 from __future__ import annotations
 
@@ -28,9 +37,10 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.orm import Character
+from app.orm import Character, CharacterItem
 from app.prompt_templates import SCENARIO_PROMPTS
 from app.services import transcript_service
+from app.services.dice_service import format_check, perform_check
 
 from .base import (
     KIND_BATTLE, ScenarioHandler, add_participant, load_state,
@@ -47,13 +57,38 @@ class BattleNPCActionOut(BaseModel):
     flavour: str = ''
 
 
+class BattleSuggestionItem(BaseModel):
+    """One categorised tactic the LLM proposes to the player."""
+    text: str = ''
+    hint: str = ''
+
+
+class BattleSuggestionsOut(BaseModel):
+    """LLM payload: one tactic per category for the player's next turn."""
+    attack: BattleSuggestionItem = Field(default_factory=BattleSuggestionItem)
+    defend: BattleSuggestionItem = Field(default_factory=BattleSuggestionItem)
+    flee: BattleSuggestionItem = Field(default_factory=BattleSuggestionItem)
+
+
+class BattleAdjudicationOut(BaseModel):
+    """Arbiter ruling for a player-declared combat action."""
+    ability: str = 'strength'
+    dc: int = 12
+    proficient: bool = False
+    advantage: bool = False
+    disadvantage: bool = False
+    damage_bonus: int = 0
+    flavour: str = ''
+    miss_flavour: str = ''
+
+
 class BattleHandler(ScenarioHandler):
     kind = KIND_BATTLE
 
     # ----- substrate hooks --------------------------------------------------
 
     def start(self, db_session, seed_id, trigger, *, current_turn=None,
-              session_factory=None):
+              session_factory=None, gpt_service=None):
         from app.orm import Scenario
         opponents = lookup_characters_by_name(db_session, seed_id,
                                               trigger.participants)
@@ -82,7 +117,7 @@ class BattleHandler(ScenarioHandler):
         add_participant(db_session, scenario, opp.id, 'opponent', 1)
 
         order = self._initiative_order(mc, opp)
-        save_state(db_session, scenario, {
+        state = {
             'round': 1,
             'turn_order': [c.id for c in order],
             'active_index': 0,
@@ -92,7 +127,16 @@ class BattleHandler(ScenarioHandler):
                        str(opp.id): opp.max_health or (opp.current_health or 1)},
             'guarding': {str(mc.id): False, str(opp.id): False},
             'log': [],
-        })
+        }
+        # Best-effort opening tactics so the player's first turn already has
+        # contextual suggestions when the LLM is wired in. Failures are
+        # silently dropped: the UI degrades to plain category buttons.
+        if gpt_service is not None and self._is_player_turn(state, mc.id):
+            suggestions = self._generate_suggestions(
+                db_session, scenario, mc, opp, state, gpt_service)
+            if suggestions:
+                state['suggestions'] = suggestions
+        save_state(db_session, scenario, state)
         db_session.commit()
         db_session.refresh(scenario)
         return scenario
@@ -114,9 +158,41 @@ class BattleHandler(ScenarioHandler):
         if not self._is_player_turn(state, player.id):
             return {'error': "It's not your turn."}, 409
 
+        # When the player declares a specific tactic AND we have an LLM, run
+        # the Arbiter -> dice -> resolution loop. Otherwise fall back to the
+        # legacy deterministic verb (so headless tests and offline play still
+        # work the way they used to).
+        player_text = (action.get('text') or '').strip()
+        adjudication = None
+        check_result = None
         entries = []
+        if player_text and gpt_service is not None:
+            adjudication = self._adjudicate_action(
+                db_session, scenario, player, opp, verb, player_text, state,
+                gpt_service)
+
         # 1) Player acts.
-        self._apply_verb(state, actor=player, target=opp, verb=verb)
+        if adjudication is not None:
+            check_result = perform_check(
+                player, adjudication.ability, adjudication.dc,
+                proficient=adjudication.proficient,
+                advantage=adjudication.advantage,
+                disadvantage=adjudication.disadvantage,
+                description=player_text,
+            )
+            check_entry = self._log_check_to_transcript(
+                session_factory, scenario, check_result, current_turn)
+            if check_entry is not None:
+                entries.append(check_entry)
+            self._apply_verb(
+                state, actor=player, target=opp, verb=verb,
+                flavour=(adjudication.flavour if check_result.success
+                         else adjudication.miss_flavour),
+                success=check_result.success,
+                damage_bonus=int(adjudication.damage_bonus or 0),
+            )
+        else:
+            self._apply_verb(state, actor=player, target=opp, verb=verb)
         entries.append(self._log_to_transcript(
             session_factory, scenario, state['log'][-1], current_turn))
 
@@ -134,6 +210,16 @@ class BattleHandler(ScenarioHandler):
             self._advance_turn(state)
             if state['active_index'] == 0:
                 state['round'] = (state.get('round') or 1) + 1
+
+        # Refresh suggestions for the next player turn while we still have an
+        # LLM in hand; clear stale ones otherwise so the UI doesn't keep
+        # offering tactics that no longer fit the situation.
+        if not resolved and self._is_player_turn(state, player.id) \
+                and gpt_service is not None:
+            state['suggestions'] = self._generate_suggestions(
+                db_session, scenario, player, opp, state, gpt_service)
+        else:
+            state.pop('suggestions', None)
 
         # Persist HP back to the Character rows so the rest of the game sees
         # the damage even if the scenario is aborted later.
@@ -166,8 +252,10 @@ class BattleHandler(ScenarioHandler):
             'round': state.get('round') or 1,
             'active_id': self._active_character_id(state),
             'log': state.get('log') or [],
-            'player': self._combatant_view(player, state) if player else None,
+            'player': (self._combatant_view(player, state, db_session=db_session)
+                       if player else None),
             'opponent': self._combatant_view(opp, state) if opp else None,
+            'suggestions': state.get('suggestions') or {},
         }
 
     # ----- internals --------------------------------------------------------
@@ -195,8 +283,16 @@ class BattleHandler(ScenarioHandler):
             return
         state['active_index'] = ((state.get('active_index') or 0) + 1) % len(order)
 
-    def _apply_verb(self, state, *, actor, target, verb, flavour=''):
-        """Apply ``verb`` to the state and append a log entry."""
+    def _apply_verb(self, state, *, actor, target, verb, flavour='',
+                    success=None, damage_bonus=0):
+        """Apply ``verb`` to the state and append a log entry.
+
+        When ``success`` is provided (the LLM-adjudicated player path) a
+        ``False`` value short-circuits the effect: an attack misses for
+        zero damage, a defend slips into a sloppy guard, a flee fails and
+        leaves the actor in the fight. ``success=None`` keeps the legacy
+        deterministic behaviour for the NPC turn and offline / test calls.
+        """
         log = state.setdefault('log', [])
         guarding = state.setdefault('guarding', {})
         hp = state.setdefault('hp', {})
@@ -206,7 +302,14 @@ class BattleHandler(ScenarioHandler):
             # Clear actor's own guard before swinging; defending only affects
             # the next incoming attack on the actor, not their own.
             guarding[akey] = False
-            damage = self._roll_damage(actor, target)
+            if success is False:
+                text = (flavour or
+                        f"{actor.name or 'Attacker'} swings at "
+                        f"{target.name or 'the target'} but misses.")
+                log.append({'actor': actor.name or '?', 'verb': 'attack',
+                            'damage': 0, 'text': text, 'hit': False})
+                return
+            damage = self._roll_damage(actor, target) + max(0, int(damage_bonus or 0))
             if guarding.get(tkey):
                 damage = max(1, damage // 2)
                 guarding[tkey] = False
@@ -215,20 +318,30 @@ class BattleHandler(ScenarioHandler):
                     f"{actor.name or 'Attacker'} strikes "
                     f"{target.name or 'the target'} for {damage} damage.")
             log.append({'actor': actor.name or '?', 'verb': 'attack',
-                        'damage': damage, 'text': text})
+                        'damage': damage, 'text': text, 'hit': True})
         elif verb == 'defend':
             guarding[akey] = True
-            text = (flavour or
-                    f"{actor.name or 'Defender'} braces for the next blow.")
+            if success is False:
+                text = (flavour or
+                        f"{actor.name or 'Defender'} fumbles their guard.")
+            else:
+                text = (flavour or
+                        f"{actor.name or 'Defender'} braces for the next blow.")
             log.append({'actor': actor.name or '?', 'verb': 'defend',
                         'text': text})
         elif verb == 'flee':
             guarding[akey] = False
+            if success is False:
+                text = (flavour or
+                        f"{actor.name or 'Combatant'} tries to break off but stumbles.")
+                log.append({'actor': actor.name or '?', 'verb': 'flee',
+                            'text': text, 'escaped': False})
+                return
             state['_fled_by'] = actor.id
             text = (flavour or
                     f"{actor.name or 'Combatant'} breaks off and flees.")
             log.append({'actor': actor.name or '?', 'verb': 'flee',
-                        'text': text})
+                        'text': text, 'escaped': True})
 
     def _roll_damage(self, actor, target):
         """Stat-driven damage roll: STR + d6, minus a slice of target AGI."""
@@ -324,14 +437,135 @@ class BattleHandler(ScenarioHandler):
         return {'id': entry.id, 'kind': transcript_service.KIND_COMBAT,
                 'speaker': speaker, 'text': text}
 
-    def _combatant_view(self, c, state):
+    def _combatant_view(self, c, state, *, db_session=None):
         hp = (state.get('hp') or {}).get(str(c.id), 0)
         max_hp = (state.get('max_hp') or {}).get(str(c.id), 1) or 1
-        return {
+        out = {
             'id': c.id, 'name': c.name, 'race': c.race, 'level': c.level,
             'hp': hp, 'max_hp': max_hp,
             'guarding': bool((state.get('guarding') or {}).get(str(c.id))),
         }
+        if db_session is not None:
+            out['inventory'] = self._player_inventory(db_session, c)
+        return out
+
+    # ----- LLM coaching path ------------------------------------------------
+
+    def _player_inventory(self, db_session, character):
+        """Return the player's carried items as plain dicts for view + prompt."""
+        rows = (
+            db_session.query(CharacterItem)
+            .filter(CharacterItem.character_id == character.id)
+            .all()
+        )
+        items = []
+        for ci in rows:
+            item = getattr(ci, 'item', None)
+            if item is None:
+                continue
+            items.append({
+                'id': ci.id,
+                'name': item.name or 'item',
+                'type': item.type or 'misc',
+                'description': item.description or '',
+                'quantity': ci.quantity or 1,
+            })
+        return items
+
+    def _format_inventory(self, items):
+        if not items:
+            return '(no items carried)'
+        lines = []
+        for it in items:
+            line = f"  - {it['name']} ({it['type']})"
+            if (it.get('quantity') or 1) > 1:
+                line += f" x{it['quantity']}"
+            if it.get('description'):
+                line += f": {it['description']}"
+            lines.append(line)
+        return '\n'.join(lines)
+
+    def _generate_suggestions(self, db_session, scenario, player, opp, state,
+                              gpt_service):
+        """Ask the LLM for one tactic per category for the player's next turn.
+
+        Returns a dict shaped ``{verb: {text, hint}}``; empty on any failure
+        so the UI can degrade to plain category buttons + free text.
+        """
+        inventory = self._player_inventory(db_session, player)
+        prompt = SCENARIO_PROMPTS['BATTLE_SUGGEST_ACTIONS'].format(
+            player_name=player.name or 'Player',
+            player_profile=self._format_combatant(player),
+            player_hp=(state.get('hp') or {}).get(str(player.id), 0),
+            player_max_hp=(state.get('max_hp') or {}).get(str(player.id), 1),
+            player_inventory=self._format_inventory(inventory),
+            opponent_name=opp.name or 'Opponent',
+            opponent_profile=self._format_combatant(opp),
+            opponent_hp=(state.get('hp') or {}).get(str(opp.id), 0),
+            opponent_max_hp=(state.get('max_hp') or {}).get(str(opp.id), 1),
+            history=self._format_log(state.get('log') or []),
+        )
+        try:
+            payload = gpt_service.get_structured(
+                prompt, BattleSuggestionsOut,
+                max_attempts=2, temperature=0.8)
+        except Exception:
+            payload = None
+        if payload is None:
+            return {}
+        out = {}
+        for verb in ('attack', 'defend', 'flee'):
+            item = getattr(payload, verb, None)
+            if item is None:
+                continue
+            text = (item.text or '').strip()
+            if not text:
+                continue
+            out[verb] = {'text': text, 'hint': (item.hint or '').strip()}
+        return out
+
+    def _adjudicate_action(self, db_session, scenario, player, opp, verb,
+                           player_text, state, gpt_service):
+        """Ask the LLM for the ability/DC/modifiers for the declared tactic."""
+        inventory = self._player_inventory(db_session, player)
+        prompt = SCENARIO_PROMPTS['BATTLE_ADJUDICATE_ACTION'].format(
+            player_name=player.name or 'Player',
+            player_profile=self._format_combatant(player),
+            player_hp=(state.get('hp') or {}).get(str(player.id), 0),
+            player_max_hp=(state.get('max_hp') or {}).get(str(player.id), 1),
+            player_inventory=self._format_inventory(inventory),
+            opponent_name=opp.name or 'Opponent',
+            opponent_profile=self._format_combatant(opp),
+            opponent_hp=(state.get('hp') or {}).get(str(opp.id), 0),
+            opponent_max_hp=(state.get('max_hp') or {}).get(str(opp.id), 1),
+            opponent_guarding=bool(
+                (state.get('guarding') or {}).get(str(opp.id))),
+            history=self._format_log(state.get('log') or []),
+            verb=verb,
+            player_text=player_text,
+        )
+        try:
+            return gpt_service.get_structured(
+                prompt, BattleAdjudicationOut,
+                max_attempts=2, temperature=0.4)
+        except Exception:
+            return None
+
+    def _log_check_to_transcript(self, session_factory, scenario, result,
+                                 current_turn):
+        """Persist the dice breakdown for the player's adjudicated action."""
+        line = format_check(result)
+        entry = transcript_service.add_entry(
+            session_factory, scenario.seed_id,
+            transcript_service.KIND_DICE, line,
+            turn=current_turn, speaker='Arbiter',
+            meta={'scenario_kind': self.kind, 'scenario_id': scenario.id,
+                  **result.to_meta()},
+        )
+        if entry is None:
+            return None
+        return {'id': entry.id, 'kind': transcript_service.KIND_DICE,
+                'speaker': 'Arbiter', 'text': line}
 
 
 handler = BattleHandler()

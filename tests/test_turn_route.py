@@ -70,7 +70,7 @@ def _fake_gpt_service(narration='You step forward.', suggestions=None,
                       ruling=None):
     """Return a MagicMock that mimics GPTService for both endpoints.
 
-    ``get_structured`` is called multiple times per turn -- the DM
+    ``get_structured`` is called multiple times per turn -- the arbiter
     adjudication pass, the narration pass, and (when the in-world clock
     has advanced enough) the autonomous-events pass. The mock dispatches
     by schema so each call gets a payload of the correct shape.

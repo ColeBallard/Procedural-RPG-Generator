@@ -1,9 +1,10 @@
 // battleScenario.js
-// Renders the turn-based combat panel: HP bars for player + opponent,
-// an initiative banner, an action bar (Attack / Defend / Flee), and the
-// rolling combat log. Action submissions go through the controller; the
-// backend runs both the player's verb and the opponent's response in a
-// single round-trip so the renderer just re-paints from the new view.
+// Renders the turn-based combat panel: HP bars for player + opponent, an
+// initiative banner, the LLM-coached tactic suggestions (one per category)
+// + a free-text declaration input, and the rolling combat log. Action
+// submissions go through the controller; the backend adjudicates the
+// declared tactic, rolls a dice check, and runs the opponent's response
+// in a single round-trip so the renderer just re-paints from the new view.
 import { el, button, header, progressBar, logList, errorBanner, showError }
     from './scenarioDom.js';
 
@@ -11,6 +12,12 @@ const VERB_LABELS = {
     attack: '⚔️ Attack',
     defend: '🛡️ Defend',
     flee: '🏃 Flee',
+};
+
+const VERB_PLACEHOLDERS = {
+    attack: 'Describe how you strike (e.g. "lunge at his sword arm")',
+    defend: 'Describe how you defend (e.g. "duck behind the table")',
+    flee: 'Describe how you escape (e.g. "vault the railing")',
 };
 
 export function renderBattleScenario(view, controller) {
@@ -27,7 +34,7 @@ export function renderBattleScenario(view, controller) {
 
     root.appendChild(buildInitiativeStrip(view));
     root.appendChild(buildCombatants(view));
-    root.appendChild(buildActionBar(view, controller, banner));
+    root.appendChild(buildActionPanel(view, controller, banner));
     root.appendChild(logList(view.log || [], { limit: 8 }));
 }
 
@@ -84,8 +91,8 @@ function combatantCard(c, side) {
     return card;
 }
 
-function buildActionBar(view, controller, banner) {
-    const wrap = el('div', { className: 'scenario-action-bar' });
+function buildActionPanel(view, controller, banner) {
+    const wrap = el('div', { className: 'scenario-action-panel' });
     const isPlayerTurn = view.active_id === view.player?.id;
     if (!isPlayerTurn) {
         wrap.appendChild(el('div', {
@@ -94,31 +101,103 @@ function buildActionBar(view, controller, banner) {
         }));
         return wrap;
     }
-    (view.verbs || Object.keys(VERB_LABELS)).forEach(verb => {
+
+    // Composer: pick a category, optionally pre-fill from a suggestion,
+    // edit / write the declaration, then submit.
+    const state = { verb: 'attack' };
+    const categoryRow = el('div', { className: 'scenario-verb-row' });
+    const verbs = view.verbs || Object.keys(VERB_LABELS);
+    const verbButtons = {};
+    verbs.forEach(verb => {
         const btn = button(VERB_LABELS[verb] || verb, {
-            className: classForVerb(verb),
-            onClick: () => {
-                showError(banner, '');
-                disableAll(wrap, true);
-                const reenable = () => disableAll(wrap, false);
-                controller.submitAction({ verb }, {
-                    onError: msg => showError(banner, msg),
-                }).then(reenable, reenable);
-            },
+            className: classForVerb(verb, verb === state.verb),
+            onClick: () => selectVerb(verb),
         });
-        wrap.appendChild(btn);
+        verbButtons[verb] = btn;
+        categoryRow.appendChild(btn);
     });
+    wrap.appendChild(categoryRow);
+
+    const suggestionsBox = el('div', { className: 'scenario-suggestions' });
+    wrap.appendChild(suggestionsBox);
+
+    const input = document.createElement('textarea');
+    input.className = 'scenario-action-input form-control';
+    input.rows = 2;
+    input.placeholder = VERB_PLACEHOLDERS[state.verb] || '';
+    wrap.appendChild(input);
+
+    const submitRow = el('div', { className: 'scenario-action-submit-row' });
+    const submitBtn = button('Commit', {
+        className: 'btn btn-sm btn-primary scenario-action-submit',
+        onClick: () => submit(),
+    });
+    submitRow.appendChild(submitBtn);
+    wrap.appendChild(submitRow);
+
+    function selectVerb(verb) {
+        state.verb = verb;
+        Object.entries(verbButtons).forEach(([v, b]) => {
+            b.className = classForVerb(v, v === verb);
+        });
+        input.placeholder = VERB_PLACEHOLDERS[verb] || '';
+        renderSuggestions();
+    }
+
+    function renderSuggestions() {
+        suggestionsBox.innerHTML = '';
+        const suggestion = (view.suggestions || {})[state.verb];
+        if (!suggestion || !suggestion.text) {
+            suggestionsBox.appendChild(el('div', {
+                className: 'scenario-suggestion-empty',
+                text: 'No coaching available — declare your own move below.',
+            }));
+            return;
+        }
+        const card = el('div', { className: 'scenario-suggestion-card' });
+        card.appendChild(el('div', {
+            className: 'scenario-suggestion-text', text: suggestion.text,
+        }));
+        if (suggestion.hint) {
+            card.appendChild(el('div', {
+                className: 'scenario-suggestion-hint', text: suggestion.hint,
+            }));
+        }
+        card.appendChild(button('Use this tactic', {
+            className: 'btn btn-sm btn-outline-light scenario-suggestion-use',
+            onClick: () => { input.value = suggestion.text; input.focus(); },
+        }));
+        suggestionsBox.appendChild(card);
+    }
+
+    function submit() {
+        const text = (input.value || '').trim();
+        showError(banner, '');
+        const setBusy = busy => {
+            submitBtn.disabled = busy;
+            input.disabled = busy;
+            Object.values(verbButtons).forEach(b => { b.disabled = busy; });
+        };
+        setBusy(true);
+        const payload = { verb: state.verb };
+        if (text) payload.text = text;
+        controller.submitAction(payload, {
+            onError: msg => showError(banner, msg),
+        }).then(() => setBusy(false), () => setBusy(false));
+    }
+
+    renderSuggestions();
     return wrap;
 }
 
-function classForVerb(verb) {
+function classForVerb(verb, active) {
     const base = 'btn btn-sm scenario-verb-btn';
-    if (verb === 'attack') return `${base} btn-danger`;
-    if (verb === 'defend') return `${base} btn-info`;
-    if (verb === 'flee') return `${base} btn-warning`;
-    return `${base} btn-secondary`;
-}
-
-function disableAll(wrap, disabled) {
-    wrap.querySelectorAll('button').forEach(b => { b.disabled = !!disabled; });
+    const tone = (
+        verb === 'attack' ? 'danger'
+        : verb === 'defend' ? 'info'
+        : verb === 'flee' ? 'warning'
+        : 'secondary'
+    );
+    return `${base} btn-${active ? '' : 'outline-'}${tone}`
+        + (active ? ' is-active' : '');
 }

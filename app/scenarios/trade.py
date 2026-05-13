@@ -56,7 +56,7 @@ class TradeHandler(ScenarioHandler):
     # ----- substrate hooks --------------------------------------------------
 
     def start(self, db_session, seed_id, trigger, *, current_turn=None,
-              session_factory=None):
+              session_factory=None, gpt_service=None):
         from app.orm import Scenario
         merchants = lookup_characters_by_name(db_session, seed_id,
                                               trigger.participants)

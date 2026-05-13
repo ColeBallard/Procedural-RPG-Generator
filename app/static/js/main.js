@@ -272,8 +272,50 @@ $.ajaxSetup({
 });
 
 // Compiled templates for each entity type rendered in the game-view
-// accordions. Populated at startup by loadEntityTemplates().
+// accordions. Populated by loadFrontendTemplates() once the user is
+// authenticated, since /templates/* is gated by @login_required and an
+// anonymous fetch would 401.
 const entityTemplates = {};
+
+// Guard so the post-login template fetch only fires once per page load
+// even though showApp() can be reached from the auth-check path, the
+// sign-in handler, and the sign-up handler.
+let _templatesLoaded = false;
+
+// Fetch the Handlebars templates served from /templates/*. Run after
+// authentication because the route is gated by @login_required; calling
+// it on document-ready (before sign-in) produced the 401 cascade and
+// left narrativeTemplate / entityTemplates empty for the rest of the
+// session. Per-fetch failures reset the guard so a later showApp() can
+// retry the whole batch.
+function loadFrontendTemplates() {
+    if (_templatesLoaded) return;
+    _templatesLoaded = true;
+
+    $.get('/templates/narrativeItem.hbs', function (template) {
+        narrativeTemplate = compileTemplate(template);
+    }).fail(function (jqXHR, textStatus, errorThrown) {
+        _templatesLoaded = false;
+        console.error('Error fetching narrative item template:', textStatus, errorThrown);
+    });
+
+    // Each entity template lives at /templates/<name>.html and is wrapped
+    // in a <script type="text/x-handlebars-template"> tag. Strip the
+    // wrapper before compiling so the inner markup is the template source.
+    const names = ['location', 'event', 'interactingCharacter', 'quest', 'item'];
+    names.forEach(function (name) {
+        $.get(`/templates/${name}.html`)
+            .done(function (html) {
+                const match = html.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
+                const source = match ? match[1] : html;
+                entityTemplates[name] = compileTemplate(source);
+            })
+            .fail(function (jqXHR, textStatus) {
+                _templatesLoaded = false;
+                console.error(`Error fetching template ${name}.html:`, textStatus);
+            });
+    });
+}
 
 // Mapping of payload key -> { templateName, accordionId, filter? }.
 // Stats, skills and statuses are no longer rendered as accordions;
@@ -314,30 +356,72 @@ let _headerCollapseTimer = null; // pending setTimeout id
 // actually moved forward, instead of every refresh.
 let _lastClockDisplay = '';
 
+// Time-of-day buckets emitted by time_service.time_of_day(). The icon
+// map gives the badge a quick visual cue and the label map normalises
+// the lower-case backend value into a properly-cased display string so
+// the badge no longer leans on font small-caps for capitalisation.
+const WORLD_CLOCK_TOD_ICONS = {
+    'dawn': '🌅',
+    'morning': '☀️',
+    'noon': '🌞',
+    'afternoon': '🌤️',
+    'evening': '🌆',
+    'night': '🌙',
+    'late night': '🌌',
+};
+const WORLD_CLOCK_TOD_LABELS = {
+    'dawn': 'Dawn',
+    'morning': 'Morning',
+    'noon': 'Noon',
+    'afternoon': 'Afternoon',
+    'evening': 'Evening',
+    'night': 'Night',
+    'late night': 'Late Night',
+};
+const WORLD_CLOCK_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 // Render or hide the in-world clock badge from a payload of the shape
 // returned by time_service.serialize_clock(). Falsy / empty payloads
 // hide the badge so the world-build phase doesn't show a stale time.
+// Date/time are derived from clock.iso rather than clock.display so the
+// time-of-day suffix that format_clock() bakes in for prompt context
+// doesn't end up duplicated next to the standalone TOD badge.
 function renderClock(clock) {
     const $clock = $('#world-clock');
     if (!$clock.length) return;
-    if (!clock || !clock.display) {
+    const iso = clock && clock.iso;
+    const isoMatch = iso && iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (!isoMatch) {
         $clock.attr('hidden', true).removeAttr('data-tod');
         _lastClockDisplay = '';
         return;
     }
+    const [, yr, mo, day, hh, mm] = isoMatch;
+    const monthLabel = WORLD_CLOCK_MONTHS[parseInt(mo, 10) - 1] || mo;
+    const dateStr = `${monthLabel} ${parseInt(day, 10)}, ${yr}`;
+    const timeStr = `${hh}:${mm}`;
+    const tod = (clock.time_of_day || 'unknown').toLowerCase();
+    const todLabel = WORLD_CLOCK_TOD_LABELS[tod] || (clock.time_of_day || '');
+    const todIcon = WORLD_CLOCK_TOD_ICONS[tod] || '🕰️';
+
     $clock.removeAttr('hidden');
-    $clock.attr('data-tod', clock.time_of_day || 'unknown');
-    $clock.find('.world-clock-display').text(clock.display);
-    $clock.find('.world-clock-tod').text(clock.time_of_day || '');
-    if (clock.display !== _lastClockDisplay && _lastClockDisplay !== '') {
-        // Brief pulse so a meaningful jump (DM-adjudicated long action,
+    $clock.attr('data-tod', tod);
+    $clock.attr('title', `${dateStr} · ${timeStr}${todLabel ? ' · ' + todLabel : ''}`);
+    $clock.find('.world-clock-icon').text(todIcon);
+    $clock.find('.world-clock-date').text(dateStr);
+    $clock.find('.world-clock-time').text(timeStr);
+    $clock.find('.world-clock-tod').text(todLabel);
+    const fingerprint = `${dateStr} ${timeStr}`;
+    if (fingerprint !== _lastClockDisplay && _lastClockDisplay !== '') {
+        // Brief pulse so a meaningful jump (arbiter-adjudicated long action,
         // travel, rest) catches the player's eye without being noisy.
         $clock.removeClass('world-clock-tick');
         // Force reflow so re-adding the class restarts the animation.
         void $clock[0].offsetWidth;
         $clock.addClass('world-clock-tick');
     }
-    _lastClockDisplay = clock.display;
+    _lastClockDisplay = fingerprint;
 }
 
 // Phase 6: dice roll overlay. Briefly flashes a centered d20 card with
@@ -382,25 +466,65 @@ function flashDiceOverlay(meta) {
     }, 1400);
 }
 
-// === Travel panel state ===
+// === Action panel state ===
 // The active seed id is captured here so the destination buttons can
 // POST to /travel without re-deriving it from the URL on every click.
 let _travelActiveSeedId = null;
+
+// Travel destinations and suggested actions share one panel below the
+// narrative; only one is visible at a time. ``_activePanel`` tracks
+// which list is currently rendered (or null for "neither"); the boolean
+// flags record whether each side has anything to show. setActivePanel()
+// applies the state to the DOM; refreshActionPanels() re-evaluates the
+// default after data updates.
+let _activePanel = null;
+let _travelHasContent = false;
+let _suggestionsHasContent = false;
+
+function setActivePanel(name) {
+    if (name === 'travel' && !_travelHasContent) name = null;
+    if (name === 'suggestions' && !_suggestionsHasContent) name = null;
+    _activePanel = name;
+    $('#travel-label')
+        .toggleClass('active', name === 'travel')
+        .attr('aria-expanded', name === 'travel' ? 'true' : 'false');
+    $('#suggestions-label')
+        .toggleClass('active', name === 'suggestions')
+        .attr('aria-expanded', name === 'suggestions' ? 'true' : 'false');
+    $('#travel-destinations').toggle(name === 'travel');
+    $('#optionsList').toggle(name === 'suggestions');
+    $('#action-panel').toggle(!!name);
+}
+
+function refreshActionPanels() {
+    $('#travel-label').toggle(_travelHasContent);
+    $('#suggestions-label').toggle(_suggestionsHasContent);
+    $('#action-tabs').toggle(_travelHasContent || _suggestionsHasContent);
+    let next = _activePanel;
+    if (next === 'travel' && !_travelHasContent) next = null;
+    if (next === 'suggestions' && !_suggestionsHasContent) next = null;
+    if (!next) {
+        if (_suggestionsHasContent) next = 'suggestions';
+        else if (_travelHasContent) next = 'travel';
+    }
+    setActivePanel(next);
+}
 
 // Render the list of reachable destinations from the MC's current
 // location. ``current`` is the {id, name, ...} payload from the world
 // response (or the /travel response after a successful trip);
 // ``destinations`` is a list of {id, name, type, terrain, minutes}.
-// Hides the panel when there's nothing to show so the world-build
-// phase doesn't surface an empty box.
+// Hides the tab when there's nothing to show so the world-build
+// phase doesn't surface an empty entry.
 function renderTravelPanel(current, destinations) {
-    const $section = $('#travel-section');
-    if (!$section.length) return;
+    if (!$('#travel-label').length) return;
     if (!current || !destinations || !destinations.length) {
-        $section.attr('hidden', true);
+        _travelHasContent = false;
+        $('#travel-destinations').empty();
+        refreshActionPanels();
         return;
     }
-    $section.removeAttr('hidden');
+    _travelHasContent = true;
     $('#travel-current-name').text(current.name || '…');
     const $list = $('#travel-destinations').empty();
     destinations.forEach(function (d) {
@@ -412,6 +536,7 @@ function renderTravelPanel(current, destinations) {
         $li.append($btn);
         $list.append($li);
     });
+    refreshActionPanels();
 }
 
 function _formatTravelCost(minutes) {
@@ -483,6 +608,9 @@ function showApp() {
     // and the API Keys view both reflect what the server actually has.
     refreshGrokKeyStatus();
     refreshElevenLabsKeyStatus();
+    // /templates/* is gated by @login_required, so the Handlebars sources
+    // can only be fetched after the user is signed in.
+    loadFrontendTemplates();
 }
 
 // Helper functions for view management
@@ -941,15 +1069,11 @@ $(document).ready(function () {
         }
     });
 
-    // Fetch the narrative item template
-    $.get('/templates/narrativeItem.hbs', function (template) {
-        narrativeTemplate = compileTemplate(template);
-    }).fail(function (jqXHR, textStatus, errorThrown) {
-        console.error('Error fetching narrative item template:', textStatus, errorThrown);
-    });
-
-    // Load all per-entity Handlebars templates used by the game-view accordions
-    loadEntityTemplates();
+    // Handlebars template fetches moved into loadFrontendTemplates(),
+    // which is called from showApp() once the user is authenticated.
+    // /templates/* is gated by @login_required, so issuing the requests
+    // here (before sign-in) was returning 401 and leaving the templates
+    // empty for the rest of the page lifecycle.
 
     // Wire the structured-scenario controller. Scenario-emitted transcript
     // entries flow through the same updateNarrativeList path as turn-emitted
@@ -1063,7 +1187,10 @@ $(document).ready(function () {
             '<div class="character-profile-empty">Building world…</div>'
         );
         $('#optionsList').empty();
-        $('#suggestions-label').hide();
+        _suggestionsHasContent = false;
+        _travelHasContent = false;
+        _activePanel = null;
+        refreshActionPanels();
         // A fresh seed can't have an in-flight scenario yet; tear down any
         // panel inherited from the previous game so the free-text input is
         // visible while the new world is being built.
@@ -1192,26 +1319,6 @@ $(document).ready(function () {
         });
     }
 
-    function loadEntityTemplates() {
-        // Each entity template lives at /templates/<name>.html and is wrapped
-        // in a <script type="text/x-handlebars-template"> tag. Strip the
-        // wrapper before compiling so the inner markup is the template source.
-        const names = [
-            'location', 'event', 'interactingCharacter', 'quest', 'item'
-        ];
-        names.forEach(name => {
-            $.get(`/templates/${name}.html`)
-                .done(html => {
-                    const match = html.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
-                    const source = match ? match[1] : html;
-                    entityTemplates[name] = compileTemplate(source);
-                })
-                .fail((jqXHR, textStatus) => {
-                    console.error(`Error fetching template ${name}.html:`, textStatus);
-                });
-        });
-    }
-
     function loadWorldData(seedId) {
         if (!seedId) return;
         // Bind the scenario controller to this seed before any payload
@@ -1286,11 +1393,11 @@ $(document).ready(function () {
     // typing their own action.
     function loadSuggestions(seedId) {
         if (!seedId) return;
-        const $list = $('#optionsList');
-        const $label = $('#suggestions-label');
-        $list.empty();
+        $('#optionsList').empty();
         $('#suggestions-label-text').text('Loading suggestions…');
-        $label.show();
+        _suggestionsHasContent = true;
+        _activePanel = 'suggestions';
+        refreshActionPanels();
         $.ajax({
             url: `/api/seed/${seedId}/suggestions`,
             type: 'GET',
@@ -1309,14 +1416,14 @@ $(document).ready(function () {
     // available for free-form input via the Submit button or Ctrl+Enter.
     function renderSuggestions(suggestions) {
         const $list = $('#optionsList');
-        const $label = $('#suggestions-label');
         $list.empty();
         if (!suggestions || suggestions.length === 0) {
-            $label.hide();
+            _suggestionsHasContent = false;
+            refreshActionPanels();
             return;
         }
         $('#suggestions-label-text').text('Suggested actions');
-        $label.show();
+        _suggestionsHasContent = true;
         suggestions.forEach(text => {
             const $li = $('<li>').addClass('nav-item');
             const $btn = $('<button>')
@@ -1329,6 +1436,7 @@ $(document).ready(function () {
             $li.append($btn);
             $list.append($li);
         });
+        refreshActionPanels();
     }
 
     // Submit the player's action to the backend, optimistically reflect it
@@ -1364,7 +1472,9 @@ $(document).ready(function () {
         // brings a fresh batch grounded in the new transcript state.
         $('#optionsList').empty();
         $('#suggestions-label-text').text('Loading suggestions…');
-        $('#suggestions-label').show();
+        _suggestionsHasContent = true;
+        _activePanel = 'suggestions';
+        refreshActionPanels();
 
         $.ajax({
             url: `/api/seed/${seedId}/turn`,
@@ -1439,26 +1549,20 @@ $(document).ready(function () {
     });
 
     // Travel destination buttons are delegated against #travel-destinations
-    // so they survive every renderTravelPanel() rebuild. The collapse
-    // toggle on #travel-label mirrors the suggestions header behaviour.
+    // so they survive every renderTravelPanel() rebuild.
     $('#travel-destinations').on('click', '.travel-destination-btn', function (e) {
         e.preventDefault();
         const id = parseInt($(this).attr('data-destination-id'), 10);
         if (id) submitTravel(id);
     });
+    // Clicking a tab activates its list (and collapses the other);
+    // clicking the active tab again collapses both. Only one panel is
+    // ever visible below the tabs.
     $('#travel-label').on('click', function () {
-        const $section = $('#travel-section');
-        const collapsed = $section.toggleClass('collapsed').hasClass('collapsed');
-        $(this).attr('aria-expanded', collapsed ? 'false' : 'true');
-        $('#travel-destinations').toggle(!collapsed);
+        setActivePanel(_activePanel === 'travel' ? null : 'travel');
     });
-
-    // Clicking the suggestions header collapses or expands the list of
-    // suggested actions without affecting the free-form input below it.
     $('#suggestions-label').on('click', function () {
-        const $section = $('#suggestions-section');
-        const collapsed = $section.toggleClass('collapsed').hasClass('collapsed');
-        $(this).attr('aria-expanded', collapsed ? 'false' : 'true');
+        setActivePanel(_activePanel === 'suggestions' ? null : 'suggestions');
     });
 
     // Render the main character's identity, vitals, attributes, skills and

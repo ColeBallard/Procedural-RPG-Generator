@@ -158,8 +158,8 @@
                         <div class="world-map-header">
                             <button type="button" id="worldMapBackBtn"
                                     class="world-map-back-btn" style="display: none;"
-                                    aria-label="Back to world view">← Region</button>
-                            <span id="worldMapTitle" class="world-map-title">Region</span>
+                                    aria-label="Back to world view">← Map</button>
+                            <span id="worldMapTitle" class="world-map-title">Map</span>
                         </div>
                         <div id="worldMap" class="world-map"></div>
                     </div>
@@ -247,7 +247,10 @@
                              stand in the world's day/night cycle. -->
                         <span id="world-clock" class="world-clock" title="In-world time" hidden>
                             <span class="world-clock-icon" aria-hidden="true">🕰️</span>
-                            <span class="world-clock-display"></span>
+                            <span class="world-clock-stack">
+                                <span class="world-clock-date"></span>
+                                <span class="world-clock-time"></span>
+                            </span>
                             <span class="world-clock-tod"></span>
                         </span>
                         <label class="tts-toggle" title="Narrate transcript with text-to-speech">
@@ -268,34 +271,28 @@
                         </button>
                     </div>
                     <div id="user-options">
-                        <!-- Travel panel: lists destinations reachable from
-                             the MC's current location with their pre-computed
-                             time costs. Renderer in main.js (renderTravelPanel)
-                             populates it from /api/world and the /travel
-                             response; hidden when no destinations are known
-                             (world-build phase, or an MC that hasn't been
-                             placed yet). -->
-                        <div id="travel-section" class="travel-section" hidden>
-                            <button type="button" id="travel-label"
-                                class="suggestions-label" aria-expanded="true"
-                                aria-controls="travel-destinations">
-                                <span class="suggestions-toggle-icon" aria-hidden="true">▾</span>
-                                <span>Travel from <span id="travel-current-name">…</span></span>
-                            </button>
-                            <ul class="nav" id="travel-destinations"></ul>
-                        </div>
-                        <!-- Suggested actions for the current situation. The
-                             label doubles as a toggle: clicking it collapses
-                             the list while leaving the input usable. The
-                             whole section hides itself when there are no
-                             suggestions to show. -->
-                        <div id="suggestions-section">
-                            <button type="button" id="suggestions-label" class="suggestions-label" style="display: none;"
-                                aria-expanded="true" aria-controls="optionsList">
+                        <!-- Action tabs: Travel destinations and Suggested
+                             actions sit side by side and share a single panel
+                             below. Only one tab is active at a time; clicking
+                             the active tab collapses both. main.js drives
+                             visibility through refreshActionPanels(). -->
+                        <div class="action-tabs" id="action-tabs" style="display: none;">
+                            <button type="button" id="suggestions-label" class="action-tab"
+                                aria-expanded="false" aria-controls="optionsList"
+                                style="display: none;">
                                 <span class="suggestions-toggle-icon" aria-hidden="true">▾</span>
                                 <span id="suggestions-label-text">Suggested actions</span>
                             </button>
-                            <ul class="nav" id="optionsList"></ul>
+                            <button type="button" id="travel-label" class="action-tab"
+                                aria-expanded="false" aria-controls="travel-destinations"
+                                style="display: none;">
+                                <span class="suggestions-toggle-icon" aria-hidden="true">▾</span>
+                                <span>Travel from <span id="travel-current-name">…</span></span>
+                            </button>  
+                        </div>
+                        <div class="action-panel" id="action-panel" style="display: none;">
+                            <ul class="nav action-list" id="travel-destinations" style="display: none;"></ul>
+                            <ul class="nav action-list" id="optionsList" style="display: none;"></ul>
                         </div>
                         <textarea id="game-input" name="game-input" class="form-control"
                             placeholder="Or go your own way... (Ctrl+Enter to submit)"></textarea>
