@@ -129,7 +129,9 @@ def test_stream_emits_error_event_on_exception(mock_world_builder_cls, mock_open
 
     error_events = [e for e in events if e['type'] == 'error']
     assert len(error_events) == 1
-    assert error_events[0]['message'] == "boom"
+    # The route deliberately returns a generic message (not str(e)) to
+    # avoid leaking exception detail to the client.
+    assert error_events[0]['message'] == "World building failed; please retry."
 
 
 @patch('app.routes.OpenAI')

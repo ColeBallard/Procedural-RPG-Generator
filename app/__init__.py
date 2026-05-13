@@ -131,12 +131,27 @@ def _csrf_set_cookie(response):
 # already loads; no 'unsafe-inline' for scripts.
 _CSP_DIRECTIVES = (
     "default-src 'self'",
-    "script-src 'self' https://cdn.jsdelivr.net https://code.jquery.com",
+    "script-src 'self' https://cdn.jsdelivr.net https://code.jquery.com "
+        "https://unpkg.com",
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
-        "https://fonts.googleapis.com",
+        "https://fonts.googleapis.com https://unpkg.com",
     "font-src 'self' https://fonts.gstatic.com data:",
-    "img-src 'self' data:",
-    "connect-src 'self'",
+    # Leaflet's stylesheet references its default marker / layer icons via
+    # url() under the same unpkg.com origin; allow-listing the origin keeps
+    # those background-image fetches from being blocked even though the
+    # custom CRS.Simple map uses circleMarkers and won't display them.
+    "img-src 'self' data: https://unpkg.com",
+    # ElevenLabs TTS audio is fetched as an mp3 blob and played via an
+    # <audio> element whose src is a blob: URL; the default-src fallback
+    # would block it, so media-src is allow-listed explicitly.
+    "media-src 'self' blob:",
+    # Source maps for the SRI-pinned CDN bundles (Bootstrap, Popper, jQuery,
+    # Leaflet) are fetched by the browser when DevTools is open; modern
+    # Chromium gates that fetch on connect-src rather than script-src /
+    # style-src, so the same CDN origins are allow-listed here to suppress
+    # the console errors.
+    "connect-src 'self' https://cdn.jsdelivr.net https://code.jquery.com "
+        "https://unpkg.com",
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -274,6 +289,18 @@ class GrokKeyStore:
 grok_key_store = GrokKeyStore()
 
 
+# --- ElevenLabs key store ---------------------------------------------------
+# Same encrypted-in-memory pattern as GrokKeyStore but for the optional
+# ElevenLabs API key used by the TTS feature. Keeping it in its own store
+# (rather than overloading GrokKeyStore) keeps the key namespaces cleanly
+# separated and lets us evolve the two features independently.
+class ElevenLabsKeyStore(GrokKeyStore):
+    """Per-user encrypted, TTL-bounded store of ElevenLabs API keys."""
+
+
+elevenlabs_key_store = ElevenLabsKeyStore()
+
+
 def createApp():
     app = Flask(__name__, static_folder='static', static_url_path='/static', template_folder='templates')
 
@@ -322,6 +349,17 @@ def createApp():
     app.config['CSRF_ENABLED'] = True
     app.config['LOGIN_REQUIRED'] = True
     app.config['GROK_API_KEY_REQUIRED'] = True
+
+    # Dev convenience: when not in production, fall back to GROK_API_KEY from
+    # the .env so a developer doesn't have to push the key via the UI on every
+    # restart. Held in app config (not the per-user store) and consumed by
+    # _extract_grok_api_key() only after the per-user lookup misses, so a key
+    # bound through POST /api/grok-key still takes precedence. Forced to None
+    # in production so this branch can never be reached there.
+    is_production = (os.getenv('FLASK_ENV') or '').lower() == 'production'
+    app.config['DEV_GROK_API_KEY'] = None if is_production else os.getenv('GROK_API_KEY')
+    # Same dev-only fallback for the optional ElevenLabs key powering TTS.
+    app.config['DEV_ELEVENLABS_API_KEY'] = None if is_production else os.getenv('ELEVENLABS_API_KEY')
     app.before_request(_csrf_protect)
     app.after_request(_csrf_set_cookie)
     app.after_request(_security_headers)

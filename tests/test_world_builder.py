@@ -29,6 +29,7 @@ def test_build_world(db_session, openai_client, grok_model, seed_in_db):
         'surrounding_characters_statuses',
         'surrounding_characters_relationships',
         'surrounding_characters_items',
+        'opening_event',
     }
     assert expected_keys <= set(results.keys())
 

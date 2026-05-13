@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.orm import (
-    Base, Seed, Character, Location, Event, Item, CharacterItem,
+    Base, Seed, Character, Location, Event, EventCharacter, Item, CharacterItem,
     Skill, CharacterSkill, Status, CharacterStatus, CharacterRelationship,
     Quest,
 )
@@ -34,11 +34,19 @@ def _seed_world(session_factory):
     s.commit()
 
     loc = Location(seed_id=1, name='Mock City', description='A test city', type='city')
-    s.add(loc)
+    # A second location with no MC-involved events; the /api/world locations
+    # list should exclude it under the MC-centric filter.
+    unvisited = Location(seed_id=1, name='Hidden Vale', description='Untouched',
+                         type='wilds')
+    s.add_all([loc, unvisited])
     s.commit()
 
-    s.add(Event(seed_id=1, name='Mock Festival', description='A test event',
-                type='festival', location_id=loc.id, start_turn=1, end_turn=5))
+    festival = Event(seed_id=1, name='Mock Festival', description='A test event',
+                     type='festival', location_id=loc.id, start_turn=1, end_turn=5)
+    npc_only_event = Event(seed_id=1, name='Villager Errand', description='NPC-only',
+                           type='errand', location_id=unvisited.id, start_turn=1, end_turn=2)
+    s.add_all([festival, npc_only_event])
+    s.commit()
 
     main_char = Character(seed_id=1, main_character=True, alive=True, name='Hero',
                           race='Human', gender=True, level=2, exp_points=10,
@@ -50,6 +58,14 @@ def _seed_world(session_factory):
                     strength=8, speed=8, agility=8, intelligence=8, wisdom=8,
                     charisma=8, current_health=50, max_health=50, current_currency=5)
     s.add_all([main_char, npc])
+    s.commit()
+
+    # The festival involves the main character; the errand only involves the
+    # NPC. The /api/world events list should surface only the former.
+    s.add(EventCharacter(seed_id=1, character_id=main_char.id,
+                         event_id=festival.id, role='participant'))
+    s.add(EventCharacter(seed_id=1, character_id=npc.id,
+                         event_id=npc_only_event.id, role='participant'))
     s.commit()
 
     item = Item(name='Sword', description='Sharp', type='weapon', value=10.0, weight=2.0)

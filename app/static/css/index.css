@@ -214,6 +214,7 @@ button:disabled, .btn:disabled {
     border-color: var(--primary-color);
     box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
     background-color: var(--bg-card-hover);
+    color: var(--text-primary);
 }
 
 .form-control::placeholder, input::placeholder, textarea::placeholder {
@@ -434,8 +435,102 @@ button:disabled, .btn:disabled {
 
 
 /* ===== GAME AREA ===== */
+/* The central narrative panel is laid out as a flex column so the input
+   controls stay pinned at the bottom while only the transcript scrolls.
+   The fixed height is inherited from .scrollable-section. */
+.narrative-section {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.narrative-section > .title {
+    flex-shrink: 0;
+}
+
+/* Wrapper around #game-output exists solely to anchor the floating
+   "scroll to latest" button: the button is absolutely positioned against
+   this container so it stays pinned to the visible bottom-right corner of
+   the transcript instead of scrolling away with the content. */
+.narrative-section .game-output-wrapper {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.narrative-section #game-output {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    margin-right: -0.5rem;
+    padding-right: 0.5rem;
+}
+
+.narrative-section #user-options,
+.narrative-section > .error,
+.narrative-section > #battle-ui {
+    flex-shrink: 0;
+}
+
+.scroll-to-bottom-btn {
+    position: absolute;
+    right: 1rem;
+    bottom: 0.75rem;
+    width: 2.25rem;
+    height: 2.25rem;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid var(--border-light);
+    background-color: var(--bg-card);
+    color: var(--text-primary, #fff);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    transform: translateY(0.5rem);
+    transition: opacity var(--transition-fast),
+                transform var(--transition-fast),
+                background-color var(--transition-fast);
+    z-index: 5;
+}
+
+.scroll-to-bottom-btn:not([hidden]) {
+    opacity: 0.95;
+    transform: translateY(0);
+}
+
+.scroll-to-bottom-btn:hover {
+    background-color: var(--primary-color);
+    color: #fff;
+}
+
+.scroll-to-bottom-btn:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+/* Match the panel's custom scrollbar on the new inner scroller. */
+.narrative-section #game-output::-webkit-scrollbar {
+    width: 10px;
+}
+.narrative-section #game-output::-webkit-scrollbar-track {
+    background: var(--bg-darker);
+    border-radius: 0.5rem;
+}
+.narrative-section #game-output::-webkit-scrollbar-thumb {
+    background: var(--border-light);
+    border-radius: 0.5rem;
+    transition: background var(--transition-fast);
+}
+.narrative-section #game-output::-webkit-scrollbar-thumb:hover {
+    background: var(--primary-color);
+}
+
 #game-output {
-    margin-bottom: 1.5rem;
+    margin-bottom: 0.5rem;
 }
 
 #narrativeList {
@@ -510,34 +605,104 @@ button:disabled, .btn:disabled {
     color: var(--primary-color);
 }
 
-.suggestions-label {
+/* "Show More" header revealing the next page of older transcript entries.
+   Sits at the top of #narrativeList, drops the per-kind left border so it
+   reads as a control rather than another narration row. */
+#narrativeList .narrative-show-more {
+    background-color: transparent;
+    border: 1px dashed var(--border-light);
+    border-radius: 0.5rem;
+    padding: 0.4rem;
+    margin-bottom: 0.75rem;
+    box-shadow: none;
+    text-align: center;
+    animation: none;
+}
+
+#narrativeList .narrative-show-more:hover {
+    background-color: var(--bg-card);
+    border-color: var(--primary-color);
+    transform: none;
+    box-shadow: none;
+}
+
+.narrative-show-more-btn {
+    color: var(--text-secondary);
+    text-decoration: none;
     font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0.25rem 0.75rem;
+}
+
+.narrative-show-more-btn:hover,
+.narrative-show-more-btn:focus {
+    color: var(--primary-color);
+    text-decoration: none;
+}
+
+.suggestions-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-muted);
     margin: 0.25rem 0 0.5rem;
+    padding: 0.15rem 0.25rem;
     font-weight: 600;
+    background: none;
+    border: none;
+    cursor: pointer;
+    box-shadow: none;
+}
+
+.suggestions-label:hover {
+    color: var(--text-primary);
+}
+
+.suggestions-toggle-icon {
+    display: inline-block;
+    font-size: 0.7rem;
+    line-height: 1;
+    transition: transform var(--transition-fast);
+}
+
+#suggestions-section.collapsed .suggestions-toggle-icon {
+    transform: rotate(-90deg);
+}
+
+#suggestions-section.collapsed #optionsList {
+    display: none;
 }
 
 #optionsList {
     list-style: none;
     padding: 0;
     margin: 0.25rem 0 0.75rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
 }
 
 #optionsList .nav-item {
-    margin-bottom: 0.5rem;
+    margin: 0;
 }
 
 #optionsList .btn-link {
-    width: 100%;
+    width: auto;
     text-align: left;
     background-color: var(--bg-card);
     border: 1px solid var(--border-color);
     border-radius: 0.5rem;
-    padding: 0.75rem 1rem;
+    padding: 0.45rem 0.75rem;
+    margin-top: 0;
     color: var(--text-primary);
+    font-size: 0.82rem;
     font-weight: 500;
+    line-height: 1.3;
     transition: all var(--transition-fast);
 }
 
@@ -545,20 +710,18 @@ button:disabled, .btn:disabled {
     background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
     border-color: var(--primary-light);
     color: white;
-    transform: translateX(8px);
     box-shadow: var(--shadow-md);
 }
 
 #game-input {
-    margin-top: 1rem;
     min-height: 100px;
     resize: vertical;
     font-family: inherit;
 }
 
 #user-options {
-    margin-top: 1.5rem;
-    padding: 1rem;
+    padding: 0.5rem;
+    margin: -0.5rem;
     background-color: rgba(30, 41, 59, 0.5);
     border-radius: 0.75rem;
     border: 1px solid var(--border-color);
@@ -653,24 +816,53 @@ button:disabled, .btn:disabled {
 
 
 /* ===== HEADER ===== */
+/* Negative left/right margins cancel the .container-fluid horizontal padding
+   (1.5rem each side, set further below) so the header bleeds to the viewport
+   edges. The .row default Bootstrap margins (-0.75rem) only cover half of it. */
 .container-fluid > .row.align-items-center {
     background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-darker) 100%);
     padding: 1.5rem 1rem;
+    margin-left: -1.5rem;
+    margin-right: -1.5rem;
     margin-bottom: 1.5rem;
     border-bottom: 2px solid var(--border-color);
     box-shadow: var(--shadow-md);
-    transform-origin: top center;
-    transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+    transition: padding 0.6s cubic-bezier(0.4, 0, 0.2, 1),
                 margin-bottom 0.6s cubic-bezier(0.4, 0, 0.2, 1),
                 opacity 0.5s ease;
 }
 
-/* Collapsed: uniform scale keeps content proportional and readable.
-   margin-bottom is set by JS to compensate for the freed layout space. */
+.container-fluid > .row.align-items-center h1,
+.container-fluid > .row.align-items-center .user-welcome,
+.container-fluid > .row.align-items-center .btn {
+    transition: font-size 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+                padding 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+                margin 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Collapsed: shrink real typography and padding so the row keeps its
+   full width and the title gets enough horizontal room to unwrap onto a
+   single line, rather than uniformly scaling the whole element. */
 .container-fluid > .row.align-items-center.header-collapsed {
-    transform: scale(0.2625);
-    opacity: 0.55;
+    padding: 0.25rem 1rem;
+    margin-bottom: 0.5rem;
+    opacity: 0.65;
     cursor: pointer;
+}
+
+.container-fluid > .row.align-items-center.header-collapsed h1 {
+    font-size: 1rem;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.container-fluid > .row.align-items-center.header-collapsed .user-welcome {
+    font-size: 0.75rem;
+}
+
+.container-fluid > .row.align-items-center.header-collapsed .btn {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
 }
 
 /* ===== RESPONSIVE DESIGN ===== */
@@ -714,9 +906,16 @@ button:disabled, .btn:disabled {
     transition: all var(--transition-fast);
 }
 
-.dropdown-item:hover {
+.dropdown-item:hover,
+.dropdown-item:focus {
     background-color: var(--bg-card-hover);
     color: var(--primary-light);
+}
+
+.dropdown-item.active,
+.dropdown-item:active {
+    background-color: var(--primary-dark);
+    color: white;
 }
 
 .dropdown-toggle::after {
@@ -890,6 +1089,40 @@ button:disabled, .btn:disabled {
     margin-top: 1rem;
 }
 
+/* Pagination bar under the saved-games list. Hidden when there's only one
+   page (the JS empties it), so the rule only needs to style the visible
+   controls case. */
+.saved-games-pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.saved-games-pagination:empty {
+    display: none;
+}
+
+.saved-games-page-btn {
+    min-width: 5.5rem;
+}
+
+.saved-games-page-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.saved-games-page-indicator {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    letter-spacing: 0.03em;
+    min-width: 7rem;
+    text-align: center;
+}
+
 /* ===== ENHANCED INTERACTIONS ===== */
 .clickable {
     cursor: pointer;
@@ -968,6 +1201,70 @@ select.form-control {
 
 select.form-control:focus {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2334d399' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+}
+
+/* The native open-options popup is rendered by the browser/OS, so the
+ * inherited near-white text from the dark theme can land on a system-white
+ * background and become unreadable. Style options explicitly so the open
+ * dropdown stays legible in any state. */
+select.form-control option,
+select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+}
+
+select.form-control option:checked,
+select option:checked {
+    background-color: var(--primary-dark);
+    color: white;
+}
+
+select.form-control option:hover,
+select option:hover,
+select.form-control option:focus,
+select option:focus {
+    background-color: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+select.form-control option:disabled,
+select option:disabled {
+    color: var(--text-muted);
+}
+
+/* ===== AUTOFILL STYLING =====
+ * Browsers (Chrome/Edge/Safari) force a light background on autofilled
+ * inputs which clashes with the dark theme's light text. Override so
+ * autofilled fields keep theme-appropriate background and visible text. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+select:-webkit-autofill,
+select:-webkit-autofill:hover,
+select:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--text-primary);
+    -webkit-box-shadow: 0 0 0 1000px var(--bg-card) inset;
+    caret-color: var(--text-primary);
+    transition: background-color 5000s ease-in-out 0s;
+}
+
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill:focus,
+select:-webkit-autofill:focus {
+    -webkit-box-shadow: 0 0 0 1000px var(--bg-card-hover) inset;
+}
+
+/* ===== CHECKBOX & RADIO STYLING =====
+ * Align native checkboxes/radios with the theme so the checked state
+ * (system blue by default) doesn't clash with the surrounding UI. */
+input[type="checkbox"],
+input[type="radio"],
+.form-check-input {
+    accent-color: var(--primary-color);
 }
 
 /* ===== NUMBER INPUT STYLING ===== */
@@ -1802,60 +2099,6 @@ textarea {
     margin-bottom: 1rem;
 }
 
-.emotional-attribute-section {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 1rem;
-    margin-bottom: 1rem;
-}
-
-.attribute-header h5 {
-    color: var(--primary-color);
-    font-size: 1.1rem;
-    margin-bottom: 0.75rem;
-    font-weight: 600;
-}
-
-.words-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-}
-
-.word-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    padding: 0.5rem 0.75rem;
-}
-
-.word-text {
-    color: var(--text-primary);
-    font-size: 0.9rem;
-}
-
-.word-actions {
-    display: flex;
-    gap: 0.25rem;
-}
-
-.word-actions button {
-    padding: 0.25rem 0.5rem;
-    font-size: 0.8rem;
-    border: none;
-    cursor: pointer;
-    border-radius: 3px;
-}
-
-.add-word-btn {
-    margin-top: 0.5rem;
-}
-
 .settings-message {
     margin-top: 1rem;
     padding: 0.75rem;
@@ -1864,7 +2107,7 @@ textarea {
     font-weight: 600;
 }
 
-/* ===== INTERACTING CHARACTERS: ACQUAINTANCE LEVELS ===== */
+/* ===== CHARACTERS: ACQUAINTANCE LEVELS ===== */
 .accordion-item.character-unknown .accordion-button {
     opacity: 0.55;
     font-style: italic;
@@ -2062,4 +2305,898 @@ textarea {
     color: var(--text-muted);
     font-style: italic;
     padding: 0.25rem 0 0.25rem 0.1rem;
+}
+
+/* ===== TTS TOGGLE + NARRATIVE PLAY BUTTONS ===== */
+/* Narrative title doubles as the TTS controls bar: the heading text on the
+   left, the on/off toggle on the right, both inside the existing sticky
+   .title surface so the controls stay visible while the transcript scrolls. */
+.narrative-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.tts-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-family: 'Crimson Text', Georgia, serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    user-select: none;
+    margin: 0;
+}
+
+.tts-toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.tts-toggle-slider {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 20px;
+    background-color: var(--border-color);
+    border-radius: 999px;
+    transition: background-color var(--transition-fast);
+    flex-shrink: 0;
+}
+
+.tts-toggle-slider::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background-color: var(--text-primary);
+    border-radius: 50%;
+    transition: transform var(--transition-fast);
+}
+
+.tts-toggle input:checked + .tts-toggle-slider {
+    background-color: var(--primary-color);
+}
+
+.tts-toggle input:checked + .tts-toggle-slider::after {
+    transform: translateX(18px);
+}
+
+.tts-toggle input:focus-visible + .tts-toggle-slider {
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.35);
+}
+
+.tts-toggle-label {
+    font-size: 0.85rem;
+    letter-spacing: 0.04em;
+}
+
+/* Per-entry play button. Lives inline at the start of each <li> so the
+   speaker label and text wrap naturally next to it; opacity dims it until
+   hover so the transcript stays the visual focus. */
+#narrativeList .narrative-tts-btn {
+    background: transparent;
+    border: 1px solid var(--border-light);
+    color: var(--text-secondary);
+    border-radius: 0.35rem;
+    padding: 0.05rem 0.35rem;
+    margin-right: 0.4rem;
+    font-size: 0.85rem;
+    line-height: 1.2;
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity var(--transition-fast),
+                color var(--transition-fast),
+                border-color var(--transition-fast);
+    vertical-align: baseline;
+}
+
+#narrativeList .nav-item:hover .narrative-tts-btn,
+#narrativeList .narrative-tts-btn:focus-visible {
+    opacity: 1;
+}
+
+#narrativeList .narrative-tts-btn:hover {
+    color: var(--primary-color);
+    border-color: var(--primary-color);
+}
+
+#narrativeList .narrative-tts-btn.is-playing {
+    color: var(--primary-color);
+    border-color: var(--primary-color);
+    opacity: 1;
+}
+
+#narrativeList .narrative-tts-btn.is-loading {
+    opacity: 0.8;
+    cursor: progress;
+}
+
+#narrativeList .narrative-tts-btn.is-disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+}
+
+
+/* ===== WORLD MAP (Info panel) =====
+   The map is rendered by app/static/js/ui/worldMap.js using Leaflet with
+   L.CRS.Simple. It sits at the top of the Info column above #infoAccordion
+   and is hidden until the seed has at least one location. The styles below
+   theme Leaflet's default UI (popups, tooltips, controls) to match the
+   surrounding dark UI -- Leaflet's stock CSS assumes a light tile base and
+   is unreadable on top of var(--bg-card). */
+.world-map-panel {
+    margin: 0.5rem -0.5rem 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    background: var(--bg-darker);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+
+.world-map-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-color);
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.world-map-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.world-map-back-btn {
+    background: transparent;
+    color: var(--primary-color);
+    border: 1px solid var(--border-light);
+    border-radius: 0.35rem;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.world-map-back-btn:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--primary-color);
+}
+
+.world-map {
+    width: 100%;
+    height: 260px;
+    background:
+        radial-gradient(circle at 20% 20%, rgba(16, 185, 129, 0.05), transparent 60%),
+        radial-gradient(circle at 80% 70%, rgba(99, 102, 241, 0.05), transparent 60%),
+        var(--bg-darker);
+}
+
+/* Leaflet container background -- defaults to light grey otherwise. */
+.world-map.leaflet-container {
+    background: transparent;
+    font-family: 'Crimson Text', Georgia, serif;
+    color: var(--text-primary);
+}
+
+/* Permanent marker labels rendered next to settlement / sub-location dots. */
+.leaflet-tooltip.world-map-label {
+    background: rgba(15, 23, 42, 0.85);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.3rem;
+    padding: 1px 6px;
+    font-size: 0.75rem;
+    font-family: 'Cinzel', serif;
+    letter-spacing: 0.02em;
+    box-shadow: var(--shadow-sm);
+    white-space: nowrap;
+}
+
+.leaflet-tooltip.world-map-label::before {
+    border: none;
+}
+
+.leaflet-tooltip.world-map-label-sub {
+    font-size: 0.7rem;
+    opacity: 0.85;
+}
+
+/* Geography labels (forests, mountain ranges, rivers, ...) hover on the
+   feature shape rather than next to a marker, so they get a borderless,
+   slightly italicised treatment that reads as a map annotation rather
+   than a place label. */
+.leaflet-tooltip.world-map-feature-label {
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    font-family: 'Cinzel', serif;
+    font-style: italic;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    text-shadow: 0 0 4px var(--bg-darker), 0 0 4px var(--bg-darker);
+    pointer-events: none;
+}
+
+.leaflet-tooltip.world-map-feature-label::before {
+    border: none;
+}
+
+/* Click popups -- richer than tooltips, used for description text. */
+.leaflet-popup-content-wrapper {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border-light);
+    border-radius: 0.5rem;
+    box-shadow: var(--shadow-md);
+}
+
+.leaflet-popup-tip {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+}
+
+.leaflet-popup-close-button {
+    color: var(--text-muted) !important;
+}
+
+.world-map-popup-name {
+    font-family: 'Cinzel', serif;
+    font-weight: 600;
+    color: var(--primary-light);
+    margin-bottom: 2px;
+}
+
+.world-map-popup-type {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.world-map-popup-desc {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    max-width: 220px;
+}
+
+/* Theme Leaflet's zoom buttons so they don't read as a stark white block. */
+.leaflet-bar a,
+.leaflet-bar a:hover {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border-bottom-color: var(--border-color);
+}
+
+.leaflet-bar a:hover {
+    background: var(--bg-card-hover);
+}
+
+/* ===== STRUCTURED SCENARIO PANEL ===== */
+/* Hosts the dialogue / battle / trade renderers mounted by
+   scenarioController.js. Layout is shared across kinds so the panel
+   reads as a single feature even when each renderer fills it with very
+   different controls. */
+.scenario-ui {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+}
+
+.scenario-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.5rem;
+}
+
+.scenario-title {
+    margin: 0;
+    font-size: 1.05rem;
+}
+
+.scenario-error {
+    color: #fda4af;
+    background: rgba(244, 63, 94, 0.12);
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+
+/* Bars used by Battle (HP) and any future progress meters. */
+.scenario-bar {
+    position: relative;
+    width: 100%;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    overflow: hidden;
+    margin-top: 0.25rem;
+}
+
+.scenario-bar-fill {
+    height: 100%;
+    background: var(--accent-color);
+    transition: width 200ms ease;
+}
+
+.scenario-bar-player .scenario-bar-fill { background: #34d399; }
+.scenario-bar-opponent .scenario-bar-fill { background: #f87171; }
+
+.scenario-bar-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 0.75rem;
+    color: var(--text-primary);
+    text-shadow: 0 0 3px rgba(0, 0, 0, 0.6);
+}
+
+/* Rolling action log shared by every kind. */
+.scenario-log {
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.4rem 0.6rem;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.scenario-log-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.scenario-log-row {
+    font-size: 0.85rem;
+    line-height: 1.35;
+    padding: 0.15rem 0;
+}
+
+.scenario-log-actor {
+    font-weight: 600;
+    color: var(--accent-color);
+    margin-right: 0.25rem;
+}
+
+/* Battle: combatants, initiative, action bar. */
+.scenario-initiative {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+}
+
+.scenario-initiative-turn.is-player-turn {
+    color: #34d399;
+    font-weight: 600;
+}
+
+.scenario-combatants {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+}
+
+.scenario-combatant {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+}
+
+.scenario-combatant.is-guarding {
+    border-color: #38bdf8;
+    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35) inset;
+}
+
+.scenario-combatant-name {
+    font-weight: 600;
+}
+
+.scenario-combatant-meta {
+    font-size: 0.75rem;
+    opacity: 0.75;
+}
+
+.scenario-combatant-status {
+    font-size: 0.75rem;
+    margin-top: 0.25rem;
+    color: #38bdf8;
+}
+
+.scenario-action-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.scenario-action-hint {
+    font-size: 0.85rem;
+    opacity: 0.75;
+    font-style: italic;
+}
+
+/* Dialogue: NPC roster + relationship strip + line input. */
+.scenario-roster {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.scenario-npc-card {
+    flex: 1 1 180px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.4rem 0.55rem;
+    cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease;
+}
+
+.scenario-npc-card:hover {
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.scenario-npc-card.is-active {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 1px var(--accent-color) inset;
+}
+
+.scenario-npc-name {
+    font-weight: 600;
+}
+
+.scenario-npc-subtitle {
+    font-size: 0.75rem;
+    opacity: 0.75;
+}
+
+.scenario-relationship {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-top: 0.35rem;
+}
+
+.scenario-rel-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.75rem;
+}
+
+.scenario-input-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.scenario-verb-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.scenario-verb-btn.is-selected {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+}
+
+.scenario-line-input {
+    background: rgba(0, 0, 0, 0.25);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+/* Trade: side-by-side baskets + haggle row. */
+.scenario-trade-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.35rem 0.6rem;
+}
+
+.scenario-trade-verdict.is-accept { color: #34d399; }
+.scenario-trade-verdict.is-reject { color: #fca5a5; }
+
+.scenario-trade-sides {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+}
+
+.scenario-trade-side {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+}
+
+.scenario-trade-side-title {
+    margin: 0 0 0.4rem 0;
+    font-size: 0.95rem;
+}
+
+.scenario-trade-currency-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    margin-bottom: 0.4rem;
+}
+
+.scenario-trade-currency-input {
+    width: 6rem;
+    background: rgba(0, 0, 0, 0.25);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.scenario-trade-inventory {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.scenario-trade-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    padding: 0.2rem 0.3rem;
+    border-radius: 4px;
+}
+
+.scenario-trade-item.is-offered {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.scenario-trade-item-name { flex: 1 1 auto; }
+.scenario-trade-item-basket { font-size: 0.75rem; opacity: 0.85; }
+.scenario-trade-empty { font-size: 0.85rem; opacity: 0.6; font-style: italic; }
+
+.scenario-trade-haggle {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.scenario-trade-pitch {
+    flex: 1 1 auto;
+    background: rgba(0, 0, 0, 0.25);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+
+/* ===== WORLD CLOCK ===== */
+/* Sits inline with the Narrative title; renderClock() in main.js toggles
+   the [hidden] attribute when no clock is available so the badge stays
+   out of the way during world-build. The time-of-day suffix uses a
+   colour ramp to give the player a quick at-a-glance read. */
+.world-clock {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-left: auto;
+    margin-right: 1rem;
+    padding: 0.25rem 0.6rem;
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.85), rgba(2, 6, 23, 0.85));
+    border: 1px solid var(--border-light);
+    border-radius: 0.5rem;
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.04em;
+    box-shadow: var(--shadow-sm);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.world-clock[hidden] { display: none; }
+
+.world-clock-icon { font-size: 1rem; line-height: 1; }
+.world-clock-display { white-space: nowrap; }
+
+.world-clock-tod {
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(99, 102, 241, 0.2);
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    color: var(--text-secondary);
+    letter-spacing: 0.08em;
+}
+
+.world-clock[data-tod="dawn"] .world-clock-tod,
+.world-clock[data-tod="evening"] .world-clock-tod {
+    background: rgba(245, 158, 11, 0.2);
+    border-color: rgba(245, 158, 11, 0.5);
+    color: #fcd34d;
+}
+.world-clock[data-tod="morning"] .world-clock-tod,
+.world-clock[data-tod="noon"] .world-clock-tod,
+.world-clock[data-tod="afternoon"] .world-clock-tod {
+    background: rgba(16, 185, 129, 0.2);
+    border-color: rgba(16, 185, 129, 0.5);
+    color: var(--primary-light);
+}
+.world-clock[data-tod="night"] .world-clock-tod,
+.world-clock[data-tod="late night"] .world-clock-tod {
+    background: rgba(99, 102, 241, 0.25);
+    border-color: rgba(99, 102, 241, 0.55);
+    color: #a5b4fc;
+}
+
+.world-clock-tick {
+    animation: clock-tick 0.6s ease-out;
+}
+
+@keyframes clock-tick {
+    0%   { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
+    50%  { transform: scale(1.06); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+    100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+
+/* ===== TRAVEL PANEL ===== */
+/* Sits between the Narrative output and the suggestions list inside
+   #user-options. renderTravelPanel() in main.js toggles [hidden] when
+   there are no destinations (world-build phase or a stranded MC). */
+.travel-section {
+    margin: 0.5rem 0 0.6rem 0;
+    padding: 0.4rem 0.5rem;
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid var(--border-light);
+    border-radius: 0.4rem;
+}
+
+.travel-section[hidden] { display: none; }
+
+.travel-section .suggestions-label {
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+#travel-current-name {
+    color: var(--primary-light);
+    font-weight: 700;
+}
+
+#travel-destinations {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: 0.4rem 0 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.travel-destination-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.55rem;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    border-radius: 999px;
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background var(--transition-fast),
+                border-color var(--transition-fast);
+}
+
+.travel-destination-btn:hover {
+    background: rgba(99, 102, 241, 0.25);
+    border-color: rgba(99, 102, 241, 0.7);
+}
+
+.travel-destination-btn:disabled {
+    opacity: 0.5;
+    cursor: progress;
+}
+
+.travel-destination-btn .travel-cost {
+    font-size: 0.72rem;
+    opacity: 0.85;
+    color: var(--text-secondary);
+}
+
+
+/* ===== TRANSCRIPT KIND STYLING (Phase 6 polish) ===== */
+/* DM ruling lines (kind=dm) and dice rolls (kind=dice) deserve their own
+   visual treatment so players parse "this is a mechanical beat" at a
+   glance. The dm row reads as a brief, italic side-note in the secondary
+   accent; the dice row uses a monospaced d20-style chip on the left so
+   it visually reads like a roll result strip. ``narrative-system`` rows
+   carry the off-screen "[News from afar]" gossip emitted by the
+   autonomous world simulator and get a parchment tint to set them apart
+   from the main scene. */
+#narrativeList .narrative-dm {
+    border-left-color: var(--secondary-color);
+    background-color: rgba(99, 102, 241, 0.08);
+    font-style: italic;
+    font-size: 0.95em;
+}
+#narrativeList .narrative-dm .narrative-speaker {
+    color: var(--secondary-color);
+    font-variant: small-caps;
+    letter-spacing: 0.06em;
+}
+
+#narrativeList .narrative-dice {
+    border-left-color: var(--accent-color);
+    background-color: rgba(245, 158, 11, 0.08);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.92em;
+    letter-spacing: 0.02em;
+}
+#narrativeList .narrative-dice .narrative-speaker {
+    color: var(--accent-color);
+    font-variant: small-caps;
+    letter-spacing: 0.06em;
+}
+
+#narrativeList .narrative-system {
+    border-left-color: #a16207;
+    background: linear-gradient(
+        90deg,
+        rgba(120, 53, 15, 0.18) 0%,
+        rgba(30, 41, 59, 0.55) 100%);
+    font-style: italic;
+    color: #fde68a;
+}
+
+
+/* ===== DICE ROLL OVERLAY ===== */
+/* Center-screen flash that fires from main.js whenever a dice transcript
+   entry lands, so the player feels the roll happen instead of just
+   reading it. Pointer events stay off so the overlay can't swallow a
+   click on the underlying transcript / suggestions. */
+.dice-roll-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 180ms ease-out;
+    z-index: 1080;
+}
+
+.dice-roll-overlay.visible {
+    opacity: 1;
+}
+
+.dice-roll-card {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 1.4rem;
+    background: linear-gradient(
+        135deg,
+        rgba(15, 23, 42, 0.96) 0%,
+        rgba(30, 41, 59, 0.96) 100%);
+    border: 2px solid var(--accent-color);
+    border-radius: 0.5rem;
+    box-shadow: var(--shadow-xl), 0 0 30px rgba(245, 158, 11, 0.35);
+    transform: translateY(8px) scale(0.96);
+    transition: transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1.4);
+}
+
+.dice-roll-overlay.visible .dice-roll-card {
+    transform: translateY(0) scale(1);
+}
+
+.dice-roll-d20 {
+    width: 3.6rem;
+    height: 3.6rem;
+    display: grid;
+    place-items: center;
+    background:
+        radial-gradient(circle at 30% 25%, #fcd34d 0%, transparent 60%),
+        radial-gradient(circle at 70% 80%, rgba(245, 158, 11, 0.6) 0%, transparent 65%),
+        var(--bg-darker);
+    border: 2px solid var(--accent-color);
+    /* CSS approximation of a d20: a 12-sided clip-path reads close enough
+       and is cheap to render in any modern browser. */
+    clip-path: polygon(
+        50% 0%, 80% 10%, 100% 35%, 100% 65%, 80% 90%,
+        50% 100%, 20% 90%, 0% 65%, 0% 35%, 20% 10%);
+    color: #fef3c7;
+    font-family: 'Cinzel', serif;
+    font-weight: 700;
+    font-size: 1.5rem;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+    animation: dice-spin 600ms ease-out;
+}
+
+.dice-roll-overlay.crit-success .dice-roll-d20 {
+    border-color: var(--success-color);
+    box-shadow: 0 0 18px rgba(16, 185, 129, 0.7);
+}
+.dice-roll-overlay.crit-fail .dice-roll-d20 {
+    border-color: var(--error-color);
+    box-shadow: 0 0 18px rgba(239, 68, 68, 0.7);
+}
+
+.dice-roll-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 12rem;
+    color: var(--text-primary);
+}
+
+.dice-roll-label {
+    font-family: 'Cinzel', serif;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent-color);
+}
+
+.dice-roll-detail {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.dice-roll-verdict {
+    font-family: 'Cinzel', serif;
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: 0.15rem;
+}
+.dice-roll-overlay.success .dice-roll-verdict { color: var(--success-color); }
+.dice-roll-overlay.failure .dice-roll-verdict { color: var(--error-color); }
+
+@keyframes dice-spin {
+    0%   { transform: rotate(-90deg) scale(0.6); opacity: 0.2; }
+    60%  { transform: rotate(20deg)  scale(1.1); opacity: 1; }
+    100% { transform: rotate(0deg)   scale(1);   opacity: 1; }
 }

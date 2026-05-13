@@ -1,7 +1,22 @@
 import { changeTabViews, setTabClickEvents } from './ui/tabs.js';
 import { setLocalStorageItem, getLocalStorageItem } from './utils/storage.js';
+import { compileTemplate } from './utils/template.js';
+import { renderWorldMap, clearWorldMap } from './ui/worldMap.js';
+import {
+    initScenarioController, setActiveSeed as setScenarioSeed,
+    mountScenario, unmountScenario, isScenarioActive,
+} from './game/scenarioController.js';
 
 let narrativeTemplate;
+
+// Narrative panel paginates through the persisted transcript so long sessions
+// don't render thousands of <li> nodes at once. narrativeEntries holds the
+// canonical in-memory copy (chronological), narrativeVisibleCount is the
+// number of most-recent entries currently mounted in #narrativeList. A
+// "Show More" button at the top reveals the next older page on demand.
+const NARRATIVE_PAGE_SIZE = 25;
+let narrativeEntries = [];
+let narrativeVisibleCount = 0;
 
 // HTML-escape arbitrary values before interpolating them into a string of
 // markup. Uses the standard jQuery text-then-html idiom so callers can keep
@@ -45,6 +60,204 @@ function refreshGrokKeyStatus() {
         });
 }
 
+// --- ElevenLabs key + TTS playback -----------------------------------------
+// Mirrors the Grok pattern: the key value lives only in the server-side
+// store; the browser only knows whether one is bound. The TTS toggle state
+// is local-only (per-browser) because it's a UX preference, not a secret.
+let _elevenlabsKeyAvailable = false;
+let _ttsEnabled = false;
+const TTS_ENABLED_STORAGE_KEY = 'tts-enabled';
+// In-flight playback handles. Object URLs for fetched audio are kept around
+// so a second click on the same entry replays without a network round trip.
+const _ttsAudioCache = new Map();   // entryId -> ObjectURL string
+let _ttsCurrentAudio = null;
+let _ttsCurrentEntryId = null;
+// FIFO queue of {seedId, entryId} pending autoplay. When a turn produces
+// several transcript entries (narration paragraphs + dialogue lines) they
+// must play one after another in chronological order rather than racing
+// each other. Manual clicks bypass the queue and preempt whatever is
+// currently playing.
+const _ttsQueue = [];
+
+function hasElevenLabsKey() {
+    return _elevenlabsKeyAvailable;
+}
+
+function refreshElevenLabsKeyStatus() {
+    return $.ajax({ url: '/api/elevenlabs-key', type: 'GET' })
+        .then(function (response) {
+            _elevenlabsKeyAvailable = !!(response && response.present);
+            updateElevenLabsKeysViewStatus();
+            updateTtsToggleAvailability();
+            return _elevenlabsKeyAvailable;
+        })
+        .catch(function () {
+            _elevenlabsKeyAvailable = false;
+            updateElevenLabsKeysViewStatus();
+            updateTtsToggleAvailability();
+            return false;
+        });
+}
+
+function updateElevenLabsKeysViewStatus() {
+    const present = hasElevenLabsKey();
+    $('#elevenlabs-api-key-status')
+        .text(present ? '✅ Key configured server-side' : '⚠️ No key configured')
+        .toggleClass('grok-key-status-ok', present)
+        .toggleClass('grok-key-status-missing', !present);
+    $('#clear-elevenlabs-key-btn').prop('disabled', !present);
+}
+
+// The TTS toggle and per-entry play buttons are visually disabled when no
+// key is configured so the user gets immediate feedback rather than a
+// failed request after clicking. The toggle itself stays clickable so the
+// user can pre-set their preference before saving a key.
+function updateTtsToggleAvailability() {
+    const enabled = hasElevenLabsKey();
+    $('.narrative-tts-btn').toggleClass('is-disabled', !enabled);
+}
+
+function getTtsEnabled() {
+    return _ttsEnabled;
+}
+
+function setTtsEnabled(enabled) {
+    _ttsEnabled = !!enabled;
+    try {
+        localStorage.setItem(TTS_ENABLED_STORAGE_KEY, _ttsEnabled ? '1' : '0');
+    } catch (_) { /* ignore storage errors */ }
+    $('#tts-toggle').prop('checked', _ttsEnabled);
+    if (!_ttsEnabled) {
+        stopCurrentTtsPlayback();
+    }
+}
+
+function loadTtsEnabledFromStorage() {
+    try {
+        _ttsEnabled = localStorage.getItem(TTS_ENABLED_STORAGE_KEY) === '1';
+    } catch (_) {
+        _ttsEnabled = false;
+    }
+    $('#tts-toggle').prop('checked', _ttsEnabled);
+}
+
+function stopCurrentTtsPlayback() {
+    if (_ttsCurrentAudio) {
+        try { _ttsCurrentAudio.pause(); } catch (_) {}
+        _ttsCurrentAudio = null;
+    }
+    if (_ttsCurrentEntryId != null) {
+        $(`.narrative-tts-btn[data-entry-id="${_ttsCurrentEntryId}"]`)
+            .removeClass('is-playing is-loading');
+        _ttsCurrentEntryId = null;
+    }
+    // Drop any pending autoplay so a hard stop (logout / TTS toggle off /
+    // manual click) doesn't leave queued entries waiting in the wings.
+    _ttsQueue.length = 0;
+}
+
+// Append an entry to the autoplay queue. New transcript entries surfaced
+// by ``updateNarrativeList`` flow through here so a turn that produces
+// several paragraphs of narration plus a dialogue line plays them one
+// after another in chronological order rather than racing each other or
+// having later requests preempt earlier ones.
+function enqueueTtsForEntry(seedId, entryId) {
+    if (!seedId || entryId == null) return;
+    if (_ttsCurrentEntryId === entryId) return;
+    if (_ttsQueue.some(item => item.entryId === entryId)) return;
+    _ttsQueue.push({ seedId: seedId, entryId: entryId });
+    _maybeStartNextInQueue();
+}
+
+// Pop the next queued entry and start playing it, but only when nothing
+// is currently in flight. Called both right after enqueueing and when the
+// previously playing entry finishes / errors out.
+function _maybeStartNextInQueue() {
+    if (_ttsCurrentAudio || _ttsCurrentEntryId != null) return;
+    if (_ttsQueue.length === 0) return;
+    const next = _ttsQueue.shift();
+    _playTtsForEntryNow(next.seedId, next.entryId, null);
+}
+
+// Manual click handler: a re-click on the playing entry stops it and lets
+// the queue resume; clicking a different entry preempts whatever is
+// playing and clears the autoplay queue so the user's explicit choice
+// wins.
+function playTtsForEntry(seedId, entryId, $btn) {
+    if (!seedId || entryId == null) return;
+    if (_ttsCurrentEntryId === entryId) {
+        stopCurrentTtsPlayback();
+        return;
+    }
+    stopCurrentTtsPlayback();
+    _playTtsForEntryNow(seedId, entryId, $btn);
+}
+
+// Internal: actually fetch and play the entry's mp3. Caller is responsible
+// for ensuring no other audio is currently in flight. The $btn argument
+// reflects loading / playing state so the user can see what's happening;
+// when omitted we look it up from the DOM (queue path doesn't have one).
+function _playTtsForEntryNow(seedId, entryId, $btn) {
+    _ttsCurrentEntryId = entryId;
+    if (!$btn || !$btn.length) {
+        $btn = $(`.narrative-tts-btn[data-entry-id="${entryId}"]`);
+    }
+    $btn.addClass('is-loading');
+
+    const cached = _ttsAudioCache.get(entryId);
+    if (cached) {
+        startAudio(cached, $btn, entryId);
+        return;
+    }
+
+    fetch(`/api/tts/${seedId}/${entryId}`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': getCsrfToken() },
+    })
+        .then(function (resp) {
+            if (!resp.ok) throw new Error(`tts ${resp.status}`);
+            return resp.blob();
+        })
+        .then(function (blob) {
+            const url = URL.createObjectURL(blob);
+            _ttsAudioCache.set(entryId, url);
+            startAudio(url, $btn, entryId);
+        })
+        .catch(function () {
+            $btn.removeClass('is-loading is-playing');
+            if (_ttsCurrentEntryId === entryId) {
+                _ttsCurrentEntryId = null;
+                _ttsCurrentAudio = null;
+            }
+            // A failed fetch shouldn't strand the rest of the queue; move
+            // on to the next entry so the player still hears later lines.
+            _maybeStartNextInQueue();
+        });
+}
+
+function startAudio(url, $btn, entryId) {
+    const audio = new Audio(url);
+    _ttsCurrentAudio = audio;
+    $btn.removeClass('is-loading').addClass('is-playing');
+    audio.addEventListener('ended', function () {
+        if (_ttsCurrentEntryId === entryId) {
+            $btn.removeClass('is-playing');
+            _ttsCurrentAudio = null;
+            _ttsCurrentEntryId = null;
+        }
+        _maybeStartNextInQueue();
+    });
+    audio.play().catch(function () {
+        $btn.removeClass('is-loading is-playing');
+        if (_ttsCurrentEntryId === entryId) {
+            _ttsCurrentAudio = null;
+            _ttsCurrentEntryId = null;
+        }
+        _maybeStartNextInQueue();
+    });
+}
+
 // Inject the CSRF header on every jQuery ajax request. The Grok key is no
 // longer attached to outbound requests: gated routes pull it from the
 // server-side, session-scoped store. The server still ignores CSRF for
@@ -58,17 +271,25 @@ $.ajaxSetup({
     }
 });
 
-// Compiled Handlebars templates for each entity type rendered in the
-// game-view accordions. Populated at startup by loadEntityTemplates().
+// Compiled templates for each entity type rendered in the game-view
+// accordions. Populated at startup by loadEntityTemplates().
 const entityTemplates = {};
 
-// Mapping of payload key -> { templateName, accordionId }.
+// Mapping of payload key -> { templateName, accordionId, filter? }.
 // Stats, skills and statuses are no longer rendered as accordions;
 // renderCharacterProfile() owns them alongside the main character's identity.
+// The optional filter narrows the payload before rendering: characters the
+// MC has never met (acquaintance_level === 'unknown') are dropped from the
+// Characters accordion so the panel only lists NPCs the player actually
+// knows. The /api/world response still includes them for other consumers.
 const ENTITY_RENDER_MAP = {
     locations:  { template: 'location',             accordion: 'locationsAccordion' },
     events:     { template: 'event',                accordion: 'eventsAccordion' },
-    characters: { template: 'interactingCharacter', accordion: 'charactersAccordion' },
+    characters: {
+        template: 'interactingCharacter',
+        accordion: 'charactersAccordion',
+        filter: (c) => c && c.acquaintance_level !== 'unknown',
+    },
     quests:     { template: 'quest',                accordion: 'questsAccordion' },
     items:      { template: 'item',                 accordion: 'itemsAccordion' },
 };
@@ -86,7 +307,157 @@ const PROFILE_STAT_META = {
 // === Header auto-collapse state ===
 let _headerHoverStart = null;    // timestamp (ms) when cursor entered the header
 let _headerCollapseTimer = null; // pending setTimeout id
-let _headerNaturalMargin = null; // measured natural margin-bottom in px, set before first collapse
+
+// === World clock state ===
+// Last clock payload rendered into #world-clock; tracking it lets the
+// renderer trigger a brief tick animation only when the displayed time
+// actually moved forward, instead of every refresh.
+let _lastClockDisplay = '';
+
+// Render or hide the in-world clock badge from a payload of the shape
+// returned by time_service.serialize_clock(). Falsy / empty payloads
+// hide the badge so the world-build phase doesn't show a stale time.
+function renderClock(clock) {
+    const $clock = $('#world-clock');
+    if (!$clock.length) return;
+    if (!clock || !clock.display) {
+        $clock.attr('hidden', true).removeAttr('data-tod');
+        _lastClockDisplay = '';
+        return;
+    }
+    $clock.removeAttr('hidden');
+    $clock.attr('data-tod', clock.time_of_day || 'unknown');
+    $clock.find('.world-clock-display').text(clock.display);
+    $clock.find('.world-clock-tod').text(clock.time_of_day || '');
+    if (clock.display !== _lastClockDisplay && _lastClockDisplay !== '') {
+        // Brief pulse so a meaningful jump (DM-adjudicated long action,
+        // travel, rest) catches the player's eye without being noisy.
+        $clock.removeClass('world-clock-tick');
+        // Force reflow so re-adding the class restarts the animation.
+        void $clock[0].offsetWidth;
+        $clock.addClass('world-clock-tick');
+    }
+    _lastClockDisplay = clock.display;
+}
+
+// Phase 6: dice roll overlay. Briefly flashes a centered d20 card with
+// the rolled face, breakdown, and verdict every time a 'dice' transcript
+// entry lands live. Pulls everything from the structured ``meta`` payload
+// the backend forwards (see CheckResult.to_meta in dice_service); no
+// re-parsing of the human-readable line is needed.
+let _diceOverlayTimer = null;
+function flashDiceOverlay(meta) {
+    if (!meta || meta.kind !== 'dice_check') return;
+    const $overlay = $('#dice-roll-overlay');
+    if (!$overlay.length) return;
+    const face = meta.d20 != null ? meta.d20 : '?';
+    const ability = meta.ability ? String(meta.ability) : 'check';
+    const dc = meta.dc != null ? meta.dc : '?';
+    const total = meta.total != null ? meta.total : '?';
+    let verdict = meta.success ? 'Success' : 'Failure';
+    if (meta.critical_success) verdict = 'Critical Success';
+    else if (meta.critical_failure) verdict = 'Critical Failure';
+    $overlay.find('.dice-roll-d20').attr('data-dice-face', face);
+    $overlay.find('.dice-roll-face').text(face);
+    $overlay.find('.dice-roll-label')
+        .text(`${ability.charAt(0).toUpperCase()}${ability.slice(1)} check`);
+    $overlay.find('.dice-roll-detail').text(`vs DC ${dc}  •  total ${total}`);
+    $overlay.find('.dice-roll-verdict').text(verdict);
+    // Reset prior state classes before applying the new outcome so a
+    // success right after a critical failure doesn't inherit red glow.
+    $overlay.removeClass('visible success failure crit-success crit-fail');
+    if (meta.success) $overlay.addClass('success');
+    else $overlay.addClass('failure');
+    if (meta.critical_success) $overlay.addClass('crit-success');
+    if (meta.critical_failure) $overlay.addClass('crit-fail');
+    // Restart the spin animation by clone-replacing the d20 element so
+    // back-to-back rolls re-trigger the keyframes.
+    const $d20 = $overlay.find('.dice-roll-d20');
+    $d20.replaceWith($d20.clone());
+    void $overlay[0].offsetWidth;
+    $overlay.addClass('visible');
+    if (_diceOverlayTimer) clearTimeout(_diceOverlayTimer);
+    _diceOverlayTimer = setTimeout(function () {
+        $overlay.removeClass('visible');
+    }, 1400);
+}
+
+// === Travel panel state ===
+// The active seed id is captured here so the destination buttons can
+// POST to /travel without re-deriving it from the URL on every click.
+let _travelActiveSeedId = null;
+
+// Render the list of reachable destinations from the MC's current
+// location. ``current`` is the {id, name, ...} payload from the world
+// response (or the /travel response after a successful trip);
+// ``destinations`` is a list of {id, name, type, terrain, minutes}.
+// Hides the panel when there's nothing to show so the world-build
+// phase doesn't surface an empty box.
+function renderTravelPanel(current, destinations) {
+    const $section = $('#travel-section');
+    if (!$section.length) return;
+    if (!current || !destinations || !destinations.length) {
+        $section.attr('hidden', true);
+        return;
+    }
+    $section.removeAttr('hidden');
+    $('#travel-current-name').text(current.name || '…');
+    const $list = $('#travel-destinations').empty();
+    destinations.forEach(function (d) {
+        const $li = $('<li/>');
+        const $btn = $('<button type="button" class="travel-destination-btn"/>');
+        $btn.attr('data-destination-id', d.id);
+        $btn.append($('<span class="travel-name"/>').text(d.name || `#${d.id}`));
+        $btn.append($('<span class="travel-cost"/>').text(_formatTravelCost(d.minutes)));
+        $li.append($btn);
+        $list.append($li);
+    });
+}
+
+function _formatTravelCost(minutes) {
+    const m = Math.max(0, parseInt(minutes || 0, 10));
+    if (m < 60) return `${m}m`;
+    const hours = Math.floor(m / 60);
+    const rem = m % 60;
+    return rem ? `${hours}h ${rem}m` : `${hours}h`;
+}
+
+// Send the player to ``destinationId``; on success the world clock,
+// current location, destinations panel and suggestions all refresh
+// against the new location.
+function submitTravel(destinationId) {
+    if (!_travelActiveSeedId || !destinationId) return;
+    const seedId = _travelActiveSeedId;
+    const $btn = $(`.travel-destination-btn[data-destination-id="${destinationId}"]`);
+    $btn.prop('disabled', true);
+    $.ajax({
+        url: `/api/seed/${seedId}/travel`,
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ destination_id: destinationId }),
+        success: function (response) {
+            if (!response || !response.success) {
+                $btn.prop('disabled', false);
+                $('#game-error').text((response && response.message) || 'Travel failed.');
+                return;
+            }
+            $('#game-error').text('');
+            updateNarrativeList(response.entries || []);
+            if (response.clock) renderClock(response.clock);
+            renderTravelPanel(response.current_location, response.destinations || []);
+            // Refresh suggestions against the new location so the next
+            // batch fits where the player just arrived.
+            if (!isScenarioActive()) {
+                loadSuggestions(seedId);
+            }
+        },
+        error: function (xhr) {
+            $btn.prop('disabled', false);
+            const msg = (xhr.responseJSON && xhr.responseJSON.message) || 'Travel failed.';
+            $('#game-error').text(msg);
+        },
+    });
+}
 
 // Helper functions for authentication
 function showLandingPage() {
@@ -97,7 +468,7 @@ function showLandingPage() {
         _headerCollapseTimer = null;
     }
     _headerHoverStart = null;
-    $('#app-header').removeClass('header-collapsed').css('margin-bottom', '').hide();
+    $('#app-header').removeClass('header-collapsed').hide();
     $('#main-menu').hide();
     $('#game-view').hide();
     $('#options-view').hide();
@@ -106,11 +477,12 @@ function showLandingPage() {
 function showApp() {
     $('#landing-page').hide();
     // Ensure header starts fully expanded when app is shown
-    $('#app-header').removeClass('header-collapsed').css('margin-bottom', '').show();
+    $('#app-header').removeClass('header-collapsed').show();
     showMainMenu();
     // Sync the cached "key configured server-side" flag so the menu gating
     // and the API Keys view both reflect what the server actually has.
     refreshGrokKeyStatus();
+    refreshElevenLabsKeyStatus();
 }
 
 // Helper functions for view management
@@ -214,6 +586,17 @@ $(document).ready(function () {
         }
     });
 
+    // Keep the floating "scroll to latest" arrow in sync with the user's
+    // scroll position, and let it jump back to the newest entry on click.
+    // Function declarations inside this ready() closure are hoisted, so the
+    // helpers referenced here are resolvable even though they're defined
+    // further down in the same scope.
+    $('#game-output').on('scroll', updateScrollToBottomButtonVisibility);
+    $('#scroll-to-bottom-btn').on('click', function () {
+        scrollNarrativeToBottom();
+        updateScrollToBottomButtonVisibility();
+    });
+
     // Authentication handlers
     $('#show-signup').click(function(e) {
         e.preventDefault();
@@ -306,10 +689,21 @@ $(document).ready(function () {
                     localStorage.removeItem('key-grok-xai');
                     localStorage.removeItem('current-seed-id');
                 } catch (_) { /* ignore storage errors */ }
+                // Drop any mounted scenario panel so the next user on this
+                // browser doesn't inherit the previous session's UI state.
+                unmountScenario();
+                setScenarioSeed(null);
+                _travelActiveSeedId = null;
+                renderTravelPanel(null, []);
                 $('#grok-api-key-input').val('');
+                $('#elevenlabs-api-key-input').val('');
                 _grokKeyAvailable = false;
+                _elevenlabsKeyAvailable = false;
+                stopCurrentTtsPlayback();
                 updateGameMenuButtonsState();
                 updateApiKeysViewStatus();
+                updateElevenLabsKeysViewStatus();
+                updateTtsToggleAvailability();
 
                 showLandingPage();
                 // Clear forms
@@ -447,6 +841,67 @@ $(document).ready(function () {
             });
     });
 
+    // ElevenLabs key save / clear. Same transport pattern as the Grok key.
+    $('#save-elevenlabs-key-btn').click(function (e) {
+        e.preventDefault();
+        const $input = $('#elevenlabs-api-key-input');
+        const $msg = $('#elevenlabs-keys-message');
+        const apiKey = ($input.val() || '').trim();
+        if (!apiKey) {
+            $msg.text('Enter your ElevenLabs API key.').show();
+            return;
+        }
+        $msg.text('Saving...').show();
+        $.ajax({
+            url: '/api/elevenlabs-key',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ api_key: apiKey })
+        })
+            .done(function () {
+                $input.val('');
+                $msg.text('Key saved server-side for this session.').show();
+                refreshElevenLabsKeyStatus();
+            })
+            .fail(function (xhr) {
+                const r = xhr.responseJSON;
+                $msg.text((r && r.message) || 'Failed to save ElevenLabs key.').show();
+            });
+    });
+
+    $('#clear-elevenlabs-key-btn').click(function (e) {
+        e.preventDefault();
+        const $msg = $('#elevenlabs-keys-message');
+        $msg.text('Clearing...').show();
+        $.ajax({ url: '/api/elevenlabs-key', type: 'DELETE' })
+            .done(function () {
+                $msg.text('Key cleared.').show();
+                refreshElevenLabsKeyStatus();
+            })
+            .fail(function () {
+                $msg.text('Failed to clear ElevenLabs key.').show();
+            });
+    });
+
+    // TTS toggle: pure UX preference, persisted in localStorage so the
+    // setting survives reloads. Disabling it stops any in-flight playback.
+    loadTtsEnabledFromStorage();
+    $('#tts-toggle').on('change', function () {
+        setTtsEnabled(this.checked);
+    });
+
+    // Per-entry play button. Delegated so the binding survives transcript
+    // re-renders. Stops any in-flight playback before starting a new one.
+    $('#narrativeList').on('click', '.narrative-tts-btn', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        const $btn = $(this);
+        const entryId = parseInt($btn.attr('data-entry-id') || $btn.closest('[data-entry-id]').attr('data-entry-id'), 10);
+        const seedId = getLocalStorageItem('current-seed-id');
+        if (!seedId || !entryId) return;
+        playTtsForEntry(seedId, entryId, $btn);
+    });
+
     // Confirmation modal handlers
     $('#cancel-new-game-btn').click(function (e) {
         e.preventDefault();
@@ -488,13 +943,22 @@ $(document).ready(function () {
 
     // Fetch the narrative item template
     $.get('/templates/narrativeItem.hbs', function (template) {
-        narrativeTemplate = Handlebars.compile(template);
+        narrativeTemplate = compileTemplate(template);
     }).fail(function (jqXHR, textStatus, errorThrown) {
         console.error('Error fetching narrative item template:', textStatus, errorThrown);
     });
 
     // Load all per-entity Handlebars templates used by the game-view accordions
     loadEntityTemplates();
+
+    // Wire the structured-scenario controller. Scenario-emitted transcript
+    // entries flow through the same updateNarrativeList path as turn-emitted
+    // ones so per-kind styling, pagination and TTS autoplay all work
+    // unchanged. ``getCsrfToken`` is hoisted via the module-level decl.
+    initScenarioController({
+        onEntries: updateNarrativeList,
+        csrfToken: getCsrfToken,
+    });
 
     // Randomize buttons in the basic-setup form. Pure client-side: a small
     // built-in pool keeps the form responsive without round-tripping to the
@@ -571,6 +1035,13 @@ $(document).ready(function () {
     });
 
     async function initializeWorldBuilding(seedId, seedData) {
+        // Reset the paginated transcript so progress lines for the new seed
+        // don't share a buffer with whatever was last loaded.
+        renderNarrativeTranscript([]);
+        // Clear the side panels too; otherwise the previous seed's locations,
+        // events, characters, quests, items and profile linger until the SSE
+        // stream finishes and loadWorldData() repopulates them.
+        resetGameViewPanels();
         updateNarrativeList("Starting world building process...");
 
         try {
@@ -579,6 +1050,28 @@ $(document).ready(function () {
             console.error("Error during world building:", error);
             updateNarrativeList("An error occurred during world building: " + error.message);
         }
+    }
+
+    // Empty every game-view side panel so stale data from a previous seed
+    // doesn't bleed through while a new world is being built. Called when a
+    // new adventure starts, before the SSE stream begins emitting progress.
+    function resetGameViewPanels() {
+        Object.values(ENTITY_RENDER_MAP).forEach(cfg => {
+            $(`#${cfg.accordion}`).empty();
+        });
+        $('#characterProfile').html(
+            '<div class="character-profile-empty">Building world…</div>'
+        );
+        $('#optionsList').empty();
+        $('#suggestions-label').hide();
+        // A fresh seed can't have an in-flight scenario yet; tear down any
+        // panel inherited from the previous game so the free-text input is
+        // visible while the new world is being built.
+        unmountScenario();
+        // Hide the previous seed's geography while the new world is being
+        // built; loadWorldData will re-render the map once /api/world/.../map
+        // returns for the freshly-seeded world.
+        clearWorldMap();
     }
 
     async function executeWorldBuildingWithSSE(seedId, seedData) {
@@ -711,7 +1204,7 @@ $(document).ready(function () {
                 .done(html => {
                     const match = html.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
                     const source = match ? match[1] : html;
-                    entityTemplates[name] = Handlebars.compile(source);
+                    entityTemplates[name] = compileTemplate(source);
                 })
                 .fail((jqXHR, textStatus) => {
                     console.error(`Error fetching template ${name}.html:`, textStatus);
@@ -721,6 +1214,12 @@ $(document).ready(function () {
 
     function loadWorldData(seedId) {
         if (!seedId) return;
+        // Bind the scenario controller to this seed before any payload
+        // arrives so a mid-flight refresh remounts the right panel. The
+        // travel panel is bound the same way so its destination buttons
+        // know which seed to POST against.
+        setScenarioSeed(seedId);
+        _travelActiveSeedId = seedId;
         $.ajax({
             url: `/api/world/${seedId}`,
             type: 'GET',
@@ -728,12 +1227,13 @@ $(document).ready(function () {
                 // Replay the persisted narrative transcript into the panel so
                 // refreshing or resuming a seed restores the same scrolling
                 // story the user saw originally, with per-kind styling intact.
-                $('#narrativeList').empty();
-                (world.transcript || []).forEach(entry => {
-                    updateNarrativeList(entry);
-                });
+                // Long histories are paginated: only the most recent page is
+                // mounted, with a "Show More" button revealing older entries.
+                renderNarrativeTranscript(world.transcript || []);
                 Object.entries(ENTITY_RENDER_MAP).forEach(([key, cfg]) => {
-                    renderEntityList(world[key] || [], cfg.template, cfg.accordion);
+                    const items = world[key] || [];
+                    const filtered = cfg.filter ? items.filter(cfg.filter) : items;
+                    renderEntityList(filtered, cfg.template, cfg.accordion);
                 });
                 renderCharacterProfile(
                     world.main_character,
@@ -741,12 +1241,41 @@ $(document).ready(function () {
                     world.skills || [],
                     world.statuses || [],
                 );
-                // Suggestions reflect the latest transcript, so refresh them
-                // alongside the world payload (resume / refresh / new game).
-                loadSuggestions(seedId);
+                renderClock(world.clock);
+                renderTravelPanel(world.current_location, world.destinations || []);
+                // Mount or tear down the structured scenario panel from the
+                // payload. While a scenario is active the free-text input and
+                // suggestion list are hidden, so skip the suggestions call to
+                // avoid showing buttons the player can't act on.
+                mountScenario(world.scenario || null);
+                if (!isScenarioActive()) {
+                    loadSuggestions(seedId);
+                }
+                // Pull the geography on its own request: the map endpoint
+                // returns the unfiltered settlement / sub-location set plus
+                // the road connections, which /api/world doesn't carry.
+                loadWorldMap(seedId);
             },
             error: function (xhr) {
                 console.error('Failed to load world data:', xhr);
+            }
+        });
+    }
+
+    // Fetch the seed's geography and hand it to the Leaflet widget. Failures
+    // are silent: the map is supplemental and must not block the rest of the
+    // game view from rendering when the endpoint hiccups.
+    function loadWorldMap(seedId) {
+        if (!seedId) return;
+        $.ajax({
+            url: `/api/world/${seedId}/map`,
+            type: 'GET',
+            success: function (payload) {
+                renderWorldMap(payload);
+            },
+            error: function (xhr) {
+                console.error('Failed to load world map:', xhr);
+                clearWorldMap();
             }
         });
     }
@@ -760,7 +1289,8 @@ $(document).ready(function () {
         const $list = $('#optionsList');
         const $label = $('#suggestions-label');
         $list.empty();
-        $label.text('Loading suggestions…').show();
+        $('#suggestions-label-text').text('Loading suggestions…');
+        $label.show();
         $.ajax({
             url: `/api/seed/${seedId}/suggestions`,
             type: 'GET',
@@ -785,7 +1315,8 @@ $(document).ready(function () {
             $label.hide();
             return;
         }
-        $label.text('Suggested actions').show();
+        $('#suggestions-label-text').text('Suggested actions');
+        $label.show();
         suggestions.forEach(text => {
             const $li = $('<li>').addClass('nav-item');
             const $btn = $('<button>')
@@ -809,6 +1340,14 @@ $(document).ready(function () {
         const action = (actionText != null ? actionText : $('#game-input').val() || '').trim();
         if (!seedId || !action) return;
         if (!requireValidGrokApiKey()) return;
+        // Free-form turns are gated while a scenario panel owns the input;
+        // the player must drive the scenario through its own action bar.
+        if (isScenarioActive()) {
+            $('#game-error').text(
+                'Resolve the active scenario before taking another free action.'
+            );
+            return;
+        }
 
         const $input = $('#game-input');
         const $submit = $('#submit-game-input-btn');
@@ -824,7 +1363,8 @@ $(document).ready(function () {
         // Clear the suggestions while the turn is in flight; the response
         // brings a fresh batch grounded in the new transcript state.
         $('#optionsList').empty();
-        $('#suggestions-label').text('Loading suggestions…').show();
+        $('#suggestions-label-text').text('Loading suggestions…');
+        $('#suggestions-label').show();
 
         $.ajax({
             url: `/api/seed/${seedId}/turn`,
@@ -832,20 +1372,51 @@ $(document).ready(function () {
             contentType: 'application/json',
             data: JSON.stringify({ action: action }),
             success: function (response) {
-                if (response.narration) {
+                // The turn returns an ordered list of new transcript entries
+                // (narration first, then per-character dialogue lines), each
+                // attributed to its own speaker so the right voice plays.
+                // ``narration`` is kept around as a legacy fallback for older
+                // backends that don't ship the structured ``entries`` array.
+                if (Array.isArray(response.entries) && response.entries.length) {
+                    response.entries.forEach(entry => updateNarrativeList(entry));
+                } else if (response.narration) {
                     updateNarrativeList({
+                        id: response.narration_id || null,
                         text: response.narration,
                         kind: 'narration',
                         speaker: 'Narrator',
                     });
                 }
-                renderSuggestions(response.suggestions || []);
+                // Pull a fresh world payload whenever the LLM introduced new
+                // characters this turn so the NPC accordion reflects them
+                // (and TTS for their voice id is wired up on next playback).
+                if (Array.isArray(response.new_characters) && response.new_characters.length) {
+                    loadWorldData(seedId);
+                }
+                // The narrator may have handed off to a structured scenario
+                // this turn. Mounting hides the free-text input + suggestions
+                // so the player drives the scenario from its own panel.
+                if (response.scenario) {
+                    mountScenario(response.scenario);
+                }
+                if (response.clock) {
+                    renderClock(response.clock);
+                }
+                if (!isScenarioActive()) {
+                    renderSuggestions(response.suggestions || []);
+                }
                 $input.val('');
             },
             error: function (xhr) {
                 const msg = xhr.responseJSON?.message || 'Failed to advance the story.';
                 $error.text(msg);
-                renderSuggestions([]);
+                // A 409 from /turn carries the active scenario so the panel
+                // can resync if local state had drifted out of sync.
+                if (xhr.responseJSON?.scenario) {
+                    mountScenario(xhr.responseJSON.scenario);
+                } else {
+                    renderSuggestions([]);
+                }
             },
             complete: function () {
                 $input.prop('disabled', false);
@@ -865,6 +1436,29 @@ $(document).ready(function () {
             e.preventDefault();
             submitGameInput();
         }
+    });
+
+    // Travel destination buttons are delegated against #travel-destinations
+    // so they survive every renderTravelPanel() rebuild. The collapse
+    // toggle on #travel-label mirrors the suggestions header behaviour.
+    $('#travel-destinations').on('click', '.travel-destination-btn', function (e) {
+        e.preventDefault();
+        const id = parseInt($(this).attr('data-destination-id'), 10);
+        if (id) submitTravel(id);
+    });
+    $('#travel-label').on('click', function () {
+        const $section = $('#travel-section');
+        const collapsed = $section.toggleClass('collapsed').hasClass('collapsed');
+        $(this).attr('aria-expanded', collapsed ? 'false' : 'true');
+        $('#travel-destinations').toggle(!collapsed);
+    });
+
+    // Clicking the suggestions header collapses or expands the list of
+    // suggested actions without affecting the free-form input below it.
+    $('#suggestions-label').on('click', function () {
+        const $section = $('#suggestions-section');
+        const collapsed = $section.toggleClass('collapsed').hasClass('collapsed');
+        $(this).attr('aria-expanded', collapsed ? 'false' : 'true');
     });
 
     // Render the main character's identity, vitals, attributes, skills and
@@ -980,82 +1574,317 @@ $(document).ready(function () {
         });
     }
 
+    // Saved-games view paginates client-side: /api/seeds returns the full
+    // list (already sorted newest-first by the server), and we slice it into
+    // pages of SAVED_GAMES_PAGE_SIZE rows so long histories stay scannable.
+    const SAVED_GAMES_PAGE_SIZE = 10;
+    const savedGamesState = { seeds: [], page: 1 };
+
     function loadSavedGames() {
         const $view = $('#load-game-view');
-        $view.html('<h3 class="tab-heading">💾 Load Game</h3><div id="saved-games-list">Loading...</div>');
+        $view.html(
+            '<h3 class="tab-heading">💾 Load Game</h3>'
+            + '<div id="saved-games-list">Loading...</div>'
+            + '<div id="saved-games-pagination" class="saved-games-pagination"></div>'
+        );
         $.ajax({
             url: '/api/seeds',
             type: 'GET',
             success: function (response) {
-                const seeds = response.seeds || [];
-                const $list = $('#saved-games-list');
-                $list.empty();
-                if (seeds.length === 0) {
-                    $list.html('<p>No saved games found.</p>');
-                    return;
-                }
-                seeds.forEach(s => {
-                    const created = s.created_at ? new Date(s.created_at).toLocaleString() : 'Unknown';
-                    const charName = s.main_character_name || '(no character)';
-                    const $row = $('<div>').addClass('saved-game-row').css({
-                        'display': 'flex', 'justify-content': 'space-between',
-                        'align-items': 'center', 'padding': '0.5rem 0',
-                        'border-bottom': '1px solid rgba(255,255,255,0.1)'
-                    });
-                    // Build the row with .text() on every user-derived field so a
-                    // crafted main_character_name (or any future field) cannot inject
-                    // markup into the saved-games list.
-                    const $info = $('<div>');
-                    $info.append($('<strong>').text(charName));
-                    $info.append('<br>');
-                    $info.append(
-                        $('<small>').text(
-                            `Seed #${s.seed_id} · Turn ${s.current_turn} · Created ${created}`
-                        )
-                    );
-                    $row.append($info);
-                    const $btn = $('<button>').addClass('btn btn-primary').text('Load').click(function () {
-                        if (!requireValidGrokApiKey()) return;
-                        setLocalStorageItem('current-seed-id', s.seed_id);
-                        showGameView();
-                        loadWorldData(s.seed_id);
-                    });
-                    $row.append($btn);
-                    $list.append($row);
-                });
+                savedGamesState.seeds = response.seeds || [];
+                savedGamesState.page = 1;
+                renderSavedGamesPage();
             },
             error: function (xhr) {
                 $('#saved-games-list').html('<p style="color:red;">Failed to load saved games.</p>');
+                $('#saved-games-pagination').empty();
                 console.error('Failed to load saved games:', xhr);
             }
         });
+    }
+
+    function renderSavedGamesPage() {
+        const $list = $('#saved-games-list');
+        const $pagination = $('#saved-games-pagination');
+        $list.empty();
+        $pagination.empty();
+
+        const seeds = savedGamesState.seeds;
+        if (seeds.length === 0) {
+            $list.html('<p>No saved games found.</p>');
+            return;
+        }
+
+        const totalPages = Math.max(1, Math.ceil(seeds.length / SAVED_GAMES_PAGE_SIZE));
+        // Clamp the page number in case the underlying list shrank between
+        // renders (e.g. a future delete action).
+        if (savedGamesState.page > totalPages) savedGamesState.page = totalPages;
+        if (savedGamesState.page < 1) savedGamesState.page = 1;
+
+        const start = (savedGamesState.page - 1) * SAVED_GAMES_PAGE_SIZE;
+        const pageSeeds = seeds.slice(start, start + SAVED_GAMES_PAGE_SIZE);
+
+        pageSeeds.forEach(s => {
+            const created = s.created_at ? new Date(s.created_at).toLocaleString() : 'Unknown';
+            const charName = s.main_character_name || '(no character)';
+            const $row = $('<div>').addClass('saved-game-row').css({
+                'display': 'flex', 'justify-content': 'space-between',
+                'align-items': 'center', 'padding': '0.5rem 0',
+                'border-bottom': '1px solid rgba(255,255,255,0.1)'
+            });
+            // Build the row with .text() on every user-derived field so a
+            // crafted main_character_name (or any future field) cannot inject
+            // markup into the saved-games list.
+            const $info = $('<div>');
+            $info.append($('<strong>').text(charName));
+            $info.append('<br>');
+            $info.append(
+                $('<small>').text(
+                    `Seed #${s.seed_id} · Turn ${s.current_turn} · Created ${created}`
+                )
+            );
+            $row.append($info);
+            const $btn = $('<button>').addClass('btn btn-primary').text('Load').click(function () {
+                if (!requireValidGrokApiKey()) return;
+                setLocalStorageItem('current-seed-id', s.seed_id);
+                showGameView();
+                loadWorldData(s.seed_id);
+            });
+            $row.append($btn);
+            $list.append($row);
+        });
+
+        renderSavedGamesPagination(totalPages);
+    }
+
+    // Render Prev / Next controls plus a "Page X of Y" indicator. Hidden
+    // outright when there's only one page so the single-save case stays
+    // visually clean.
+    function renderSavedGamesPagination(totalPages) {
+        const $pagination = $('#saved-games-pagination');
+        $pagination.empty();
+        if (totalPages <= 1) return;
+
+        const page = savedGamesState.page;
+        const $prev = $('<button>')
+            .attr('type', 'button')
+            .addClass('btn btn-secondary saved-games-page-btn')
+            .text('← Prev')
+            .prop('disabled', page <= 1)
+            .on('click', function () {
+                if (savedGamesState.page > 1) {
+                    savedGamesState.page -= 1;
+                    renderSavedGamesPage();
+                }
+            });
+        const $next = $('<button>')
+            .attr('type', 'button')
+            .addClass('btn btn-secondary saved-games-page-btn')
+            .text('Next →')
+            .prop('disabled', page >= totalPages)
+            .on('click', function () {
+                if (savedGamesState.page < totalPages) {
+                    savedGamesState.page += 1;
+                    renderSavedGamesPage();
+                }
+            });
+        const $indicator = $('<span>')
+            .addClass('saved-games-page-indicator')
+            .text(`Page ${page} of ${totalPages}`);
+
+        $pagination.append($prev).append($indicator).append($next);
+    }
+
+    // Normalise an entry-or-string argument into the { text, kind, speaker }
+    // shape the narrative template expects. Plain strings come from legacy
+    // call sites that emit quick system messages.
+    function normaliseNarrativeEntry(entryOrText) {
+        const entry = (typeof entryOrText === 'string')
+            ? { text: entryOrText, kind: 'system' }
+            : entryOrText;
+        return {
+            // Persisted entries carry an id; ephemeral / streamed messages
+            // (world-building progress, optimistic player echoes) don't, and
+            // the template suppresses the TTS button when id is missing.
+            id: entry.id != null ? entry.id : null,
+            text: entry.text,
+            kind: entry.kind || 'system',
+            speaker: entry.speaker || null,
+            // Structured payload (e.g. dice roll breakdown) preserved so
+            // downstream consumers (dice overlay flash, future scenario
+            // hooks) can read it without re-parsing the text line.
+            meta: entry.meta || null,
+        };
+    }
+
+    // Tolerance (in pixels) for treating the transcript as "scrolled to the
+    // bottom". Browser sub-pixel rounding plus the trailing margin on the
+    // last entry can leave a few pixels of slack even when the user is fully
+    // pinned to the latest content; this threshold keeps the auto-follow
+    // behaviour from disengaging on those near-misses.
+    const NARRATIVE_BOTTOM_THRESHOLD_PX = 24;
+
+    function getNarrativeScroller() {
+        return document.getElementById('game-output');
+    }
+
+    function isNarrativeAtBottom() {
+        const el = getNarrativeScroller();
+        if (!el) return true;
+        return (el.scrollHeight - el.scrollTop - el.clientHeight)
+            <= NARRATIVE_BOTTOM_THRESHOLD_PX;
+    }
+
+    function scrollNarrativeToBottom() {
+        const el = getNarrativeScroller();
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+    }
+
+    // Show the floating jump-to-latest arrow only when the user has scrolled
+    // far enough up that auto-follow has disengaged and new content would
+    // otherwise be appended off-screen.
+    function updateScrollToBottomButtonVisibility() {
+        const $btn = $('#scroll-to-bottom-btn');
+        if (!$btn.length) return;
+        if (isNarrativeAtBottom()) {
+            $btn.attr('hidden', 'hidden');
+        } else {
+            $btn.removeAttr('hidden');
+        }
     }
 
     // Append a narrative entry to #narrativeList. Accepts either a plain
     // string (legacy / quick system messages) or a transcript entry object
     // with at least { text, kind, speaker } so per-kind styling and speaker
     // attribution survive both live-streamed messages and replayed history.
+    // The entry is also pushed onto narrativeEntries so the pagination state
+    // stays in sync with what the user has already seen.
     function updateNarrativeList(entryOrText) {
         if (!narrativeTemplate) {
             console.error('Narrative item template not loaded');
             return;
         }
-        const entry = (typeof entryOrText === 'string')
-            ? { text: entryOrText, kind: 'system' }
-            : entryOrText;
-        const context = {
-            text: entry.text,
-            kind: entry.kind || 'system',
-            speaker: entry.speaker || null,
-        };
+        const context = normaliseNarrativeEntry(entryOrText);
+        // Capture the follow state before mutation: if the user was already
+        // pinned to the latest entry, keep them pinned by scrolling after the
+        // append; if they had scrolled up to read history, leave their
+        // viewport alone and let the floating arrow advertise the new line.
+        const stickToBottom = isNarrativeAtBottom();
+        narrativeEntries.push(context);
+        narrativeVisibleCount += 1;
         $('#narrativeList').append(narrativeTemplate(context));
+        if (stickToBottom) {
+            scrollNarrativeToBottom();
+        }
+        updateScrollToBottomButtonVisibility();
+        // Phase 6: flash the d20 overlay for live dice entries so the
+        // player feels the roll happen instead of just reading it.
+        // Skipped for transcript replay (renderNarrativeTranscript
+        // path) so resuming a session doesn't trigger a stale flash.
+        if (context.kind === 'dice' && context.meta) {
+            flashDiceOverlay(context.meta);
+        }
+        // Autoplay newly-appended narration / dialogue when the toggle is
+        // on and a key is configured. Skipped for system / world-building /
+        // player-input lines so the user doesn't hear their own commands or
+        // progress chatter spoken back. The queue path keeps multi-entry
+        // turns playing in chronological order instead of overlapping.
+        if (context.id != null && getTtsEnabled() && hasElevenLabsKey()) {
+            const speakable = context.kind === 'narration' || context.kind === 'dialogue';
+            if (speakable) {
+                const seedId = getLocalStorageItem('current-seed-id');
+                if (seedId) enqueueTtsForEntry(seedId, context.id);
+            }
+        }
+    }
+
+    // Replace the buffer with a full transcript and render only the most
+    // recent NARRATIVE_PAGE_SIZE entries. Older entries stay in memory and
+    // become visible one page at a time via the "Show More" button.
+    function renderNarrativeTranscript(entries) {
+        if (!narrativeTemplate) {
+            console.error('Narrative item template not loaded');
+            return;
+        }
+        narrativeEntries = (entries || []).map(normaliseNarrativeEntry);
+        narrativeVisibleCount = Math.min(narrativeEntries.length, NARRATIVE_PAGE_SIZE);
+        const $list = $('#narrativeList');
+        $list.empty();
+        const start = narrativeEntries.length - narrativeVisibleCount;
+        let html = '';
+        for (let i = start; i < narrativeEntries.length; i++) {
+            html += narrativeTemplate(narrativeEntries[i]);
+        }
+        $list.append(html);
+        refreshNarrativeShowMoreButton();
+        // A full re-render always represents "the user just opened / resumed
+        // this transcript", so jump straight to the latest content. The
+        // scroller may still be hidden (game view not yet shown) when this
+        // runs, in which case scrollHeight is 0 and the assignment is a
+        // harmless no-op that the next visible append will correct.
+        scrollNarrativeToBottom();
+        updateScrollToBottomButtonVisibility();
+    }
+
+    // Toggle the "Show More" header at the top of #narrativeList based on
+    // whether older entries remain hidden. The button label advertises how
+    // many entries the next click will reveal so the user can gauge cost.
+    function refreshNarrativeShowMoreButton() {
+        const $list = $('#narrativeList');
+        $list.find('.narrative-show-more').remove();
+        const hidden = narrativeEntries.length - narrativeVisibleCount;
+        if (hidden <= 0) return;
+        const next = Math.min(NARRATIVE_PAGE_SIZE, hidden);
+        const $li = $('<li>').addClass('nav-item narrative-show-more');
+        const $btn = $('<button>')
+            .attr('type', 'button')
+            .addClass('btn btn-link narrative-show-more-btn')
+            .text(`Show ${next} more (${hidden} hidden)`)
+            .on('click', showMoreNarrativeEntries);
+        $li.append($btn);
+        $list.prepend($li);
+    }
+
+    // Reveal the next older page of transcript entries. Captures the scroll
+    // container's geometry before mutation and restores the user's viewport
+    // afterwards so prepended history doesn't shove the current text out of
+    // sight.
+    function showMoreNarrativeEntries() {
+        if (narrativeVisibleCount >= narrativeEntries.length) return;
+        const additional = Math.min(
+            NARRATIVE_PAGE_SIZE,
+            narrativeEntries.length - narrativeVisibleCount,
+        );
+        const newEnd = narrativeEntries.length - narrativeVisibleCount;
+        const newStart = newEnd - additional;
+
+        const $list = $('#narrativeList');
+        const $scroller = $list.closest('#game-output');
+        const scroller = $scroller.get(0);
+        const prevHeight = scroller ? scroller.scrollHeight : 0;
+        const prevTop = scroller ? scroller.scrollTop : 0;
+
+        let html = '';
+        for (let i = newStart; i < newEnd; i++) {
+            html += narrativeTemplate(narrativeEntries[i]);
+        }
+        $list.find('.narrative-show-more').remove();
+        $list.prepend(html);
+        narrativeVisibleCount += additional;
+        refreshNarrativeShowMoreButton();
+
+        if (scroller) {
+            scroller.scrollTop = prevTop + (scroller.scrollHeight - prevHeight);
+        }
     }
 
     // === Header auto-collapse on hover leave ===
     // On mouseenter: cancel any pending collapse and restore the header.
     // On mouseleave: wait an exponentially growing delay (based on dwell time,
-    //   capped at 9 s input) then collapse the header by sliding it up and
-    //   shrinking it to 1/16 its size.
+    //   capped at 9 s input) then collapse the header by shrinking the real
+    //   typography and padding so the row keeps full width and the title
+    //   reflows onto a single line.
     //
     // Delay formula: e^(dwellSeconds / 3) * 1000 ms
     //   dwell 0 s  →  ~1 s delay
@@ -1064,37 +1893,20 @@ $(document).ready(function () {
     //   dwell 9 s  →  ~20 s delay  (cap)
     $('#app-header')
         .on('mouseenter', function () {
-            // Cancel any pending collapse
             if (_headerCollapseTimer !== null) {
                 clearTimeout(_headerCollapseTimer);
                 _headerCollapseTimer = null;
             }
-            const $h = $(this);
-            // Restore margin-bottom to natural value to trigger smooth transition back
-            if (_headerNaturalMargin !== null) {
-                $h.css('margin-bottom', _headerNaturalMargin + 'px');
-                setTimeout(() => $h.css('margin-bottom', ''), 650);
-            }
-            $h.removeClass('header-collapsed');
+            $(this).removeClass('header-collapsed');
             _headerHoverStart = Date.now();
         })
         .on('mouseleave', function () {
             const dwellMs = _headerHoverStart !== null ? (Date.now() - _headerHoverStart) : 0;
-            // Cap the dwell time input at 9 seconds
             const dwellSeconds = Math.min(dwellMs / 1000, 9);
-            // Exponential delay
             const delayMs = Math.pow(Math.E, dwellSeconds / 3) * 1000;
 
             const $header = $(this);
             _headerCollapseTimer = setTimeout(function () {
-                // Measure the full height and natural margin before collapsing
-                const scale = 0.2625;
-                const fullH = $header.outerHeight();
-                _headerNaturalMargin = parseFloat($header.css('margin-bottom')) || 0;
-                // Compensate for the freed layout space: the transform shrinks visually but doesn't affect layout,
-                // so we need to pull the next element up by reducing margin-bottom
-                const compensatedMargin = _headerNaturalMargin - fullH * (1 - scale);
-                $header.css('margin-bottom', compensatedMargin + 'px');
                 $header.addClass('header-collapsed');
                 _headerCollapseTimer = null;
             }, delayMs);
@@ -1306,9 +2118,6 @@ $(document).ready(function () {
                 $('#min-grok-select').val(settings.min_grok);
                 $('#max-grok-select').val(settings.max_grok);
 
-                // Render emotional attributes
-                renderEmotionalAttributes(settings.emotional_attributes);
-
                 // Attach auto-save handlers to dropdowns
                 $('#min-grok-select, #max-grok-select').off('change').on('change', autoSaveSettings);
             },
@@ -1323,7 +2132,6 @@ $(document).ready(function () {
         const settingsData = {
             min_grok: $('#min-grok-select').val(),
             max_grok: $('#max-grok-select').val(),
-            emotional_attributes: currentSettings.emotional_attributes,
         };
 
         $.ajax({
@@ -1338,88 +2146,6 @@ $(document).ready(function () {
             error: function(error) {
                 console.error('Error saving settings:', error);
                 $('#settings-message').text('❌ Error saving').css('color', 'red').show();
-            }
-        });
-    }
-
-    function renderEmotionalAttributes(emotionalAttrs) {
-        const container = $('#emotional-attributes-container');
-        container.empty();
-
-        for (const [attrName, words] of Object.entries(emotionalAttrs)) {
-            const attrDiv = $('<div>').addClass('emotional-attribute-section');
-
-            // Header with attribute name
-            const header = $('<div>').addClass('attribute-header');
-            header.append($('<h5>').text(attrName.charAt(0).toUpperCase() + attrName.slice(1)));
-            attrDiv.append(header);
-
-            // Words list
-            const wordsList = $('<div>').addClass('words-list').attr('data-attribute', attrName);
-            words.forEach((word, index) => {
-                const wordItem = $('<div>').addClass('word-item');
-                wordItem.append($('<span>').addClass('word-text').text(word));
-
-                const actions = $('<div>').addClass('word-actions');
-                actions.append(
-                    $('<button>').addClass('btn btn-sm btn-secondary edit-word-btn')
-                        .text('✏️').attr('data-index', index).attr('data-attribute', attrName)
-                );
-                actions.append(
-                    $('<button>').addClass('btn btn-sm btn-danger delete-word-btn')
-                        .text('🗑️').attr('data-index', index).attr('data-attribute', attrName)
-                );
-                wordItem.append(actions);
-                wordsList.append(wordItem);
-            });
-            attrDiv.append(wordsList);
-
-            // Add word button
-            const addBtn = $('<button>').addClass('btn btn-sm btn-primary add-word-btn')
-                .text('➕ Add Word').attr('data-attribute', attrName);
-            attrDiv.append(addBtn);
-
-            container.append(attrDiv);
-        }
-
-        // Attach event handlers
-        attachEmotionalAttributeHandlers();
-    }
-
-    function attachEmotionalAttributeHandlers() {
-        // Add word
-        $('.add-word-btn').off('click').on('click', function() {
-            const attrName = $(this).attr('data-attribute');
-            const newWord = prompt(`Enter a new word for ${attrName}:`);
-            if (newWord && newWord.trim()) {
-                currentSettings.emotional_attributes[attrName].push(newWord.trim());
-                renderEmotionalAttributes(currentSettings.emotional_attributes);
-                autoSaveSettings(); // Auto-save after adding
-            }
-        });
-
-        // Edit word
-        $('.edit-word-btn').off('click').on('click', function() {
-            const attrName = $(this).attr('data-attribute');
-            const index = parseInt($(this).attr('data-index'));
-            const currentWord = currentSettings.emotional_attributes[attrName][index];
-            const newWord = prompt(`Edit word:`, currentWord);
-            if (newWord && newWord.trim()) {
-                currentSettings.emotional_attributes[attrName][index] = newWord.trim();
-                renderEmotionalAttributes(currentSettings.emotional_attributes);
-                autoSaveSettings(); // Auto-save after editing
-            }
-        });
-
-        // Delete word
-        $('.delete-word-btn').off('click').on('click', function() {
-            const attrName = $(this).attr('data-attribute');
-            const index = parseInt($(this).attr('data-index'));
-            const word = currentSettings.emotional_attributes[attrName][index];
-            if (confirm(`Delete "${word}"?`)) {
-                currentSettings.emotional_attributes[attrName].splice(index, 1);
-                renderEmotionalAttributes(currentSettings.emotional_attributes);
-                autoSaveSettings(); // Auto-save after deleting
             }
         });
     }

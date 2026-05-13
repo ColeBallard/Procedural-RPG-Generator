@@ -34,6 +34,7 @@ def run_startup_tasks(engine, session_factory):
     """Convenience wrapper called from ``createApp``."""
     if os.getenv("AUTO_MIGRATE", "1") != "0":
         ensure_schema_extras(engine)
+        ensure_table_column_extras(engine)
         rename_columns(engine)
         drop_retired_columns(engine)
     if os.getenv("AUTO_SEED_NAMES", "1") != "0":
@@ -45,6 +46,30 @@ def run_startup_tasks(engine, session_factory):
 # --------------------------------------------------------------------- #
 _EXPECTED_SEED_COLUMNS = {
     "naming_themes": "ALTER TABLE Seeds ADD COLUMN naming_themes TEXT",
+    # Phase 5 (autonomous events): tracks the in-world datetime at which
+    # the background simulator last ran for this seed.
+    "last_event_sim_at":
+        "ALTER TABLE Seeds ADD COLUMN last_event_sim_at DATETIME",
+    # Owning user. Nullable so the column can be added on existing
+    # databases without a backfill; the routes treat ``user_id IS NULL``
+    # as inaccessible when LOGIN_REQUIRED is on so orphaned legacy seeds
+    # are not exposed to other users (BOLA / IDOR fix).
+    "user_id": "ALTER TABLE Seeds ADD COLUMN user_id INT UNSIGNED DEFAULT NULL",
+}
+
+# Per-table column adds keyed by table name. Used for tables other than
+# Seeds; the Seeds adds above are kept in their own dict for backwards
+# compatibility with the original ensure_schema_extras flow.
+_EXPECTED_TABLE_COLUMNS = {
+    "Characters": {
+        "voice_id": "ALTER TABLE Characters ADD COLUMN voice_id VARCHAR(64)",
+        # Phase 4 (travel): per-character "where am I right now" pointer.
+        # No FK constraint here -- the legacy DDL declares Locations.id as
+        # ``int unsigned`` so an ALTER ADD COLUMN with a typed FK fails on
+        # MySQL; the read path joins by id explicitly instead.
+        "current_location_id":
+            "ALTER TABLE Characters ADD COLUMN current_location_id INTEGER",
+    },
 }
 
 # Columns that have been removed from the ORM and should be dropped from
@@ -95,6 +120,34 @@ def ensure_schema_extras(engine):
                 if column not in refreshed:
                     log.error("ensure_schema_extras: failed to add Seeds.%s: %s",
                               column, e)
+
+
+def ensure_table_column_extras(engine):
+    """Apply column adds for non-Seeds tables that ``create_all`` skips."""
+    for table, columns in _EXPECTED_TABLE_COLUMNS.items():
+        try:
+            inspector = inspect(engine)
+            existing = {c["name"] for c in inspector.get_columns(table)}
+        except Exception as e:
+            log.warning("ensure_table_column_extras: could not inspect %s: %s",
+                        table, e)
+            continue
+
+        with engine.begin() as conn:
+            for column, ddl in columns.items():
+                if column in existing:
+                    continue
+                try:
+                    conn.execute(text(ddl))
+                    log.info("ensure_table_column_extras: added %s.%s",
+                             table, column)
+                except Exception as e:
+                    refreshed = {c["name"] for c in inspect(engine).get_columns(table)}
+                    if column not in refreshed:
+                        log.error(
+                            "ensure_table_column_extras: failed to add %s.%s: %s",
+                            table, column, e,
+                        )
 
 
 def rename_columns(engine):

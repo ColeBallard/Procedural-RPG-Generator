@@ -43,11 +43,22 @@ class User(Base):
 class Seed(Base):
     __tablename__ = 'Seeds'
     id = Column(Integer, primary_key=True, default=lambda: random.randint(100000, 999999))
+    # Owning user. Nullable so the column can be added on existing databases
+    # without a backfill; routes treat ``user_id IS NULL`` as inaccessible
+    # when LOGIN_REQUIRED is on so orphaned legacy seeds are not exposed
+    # to other users.
+    user_id = Column(Integer, ForeignKey('Users.id'))
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now)
     current_date_time = Column(DateTime)
     current_turn = Column(Integer, default=1)
     naming_themes = Column(Text)  # JSON: [{"source": "...", "theme": "..."}]
+    # Phase 5 (autonomous events): the in-world datetime at which the
+    # background-event simulator last ran. The simulator only fires when
+    # ``current_date_time`` has moved beyond ``last_event_sim_at`` by
+    # at least ``world_simulation.MIN_INTERVAL_MINUTES`` so a string of
+    # rapid turns doesn't spam the off-screen world with events.
+    last_event_sim_at = Column(DateTime)
     characters = relationship('Character', back_populates='seed')
     character_items = relationship('CharacterItem', back_populates='seed')
     quests = relationship('Quest', back_populates='seed')
@@ -79,7 +90,19 @@ class Character(Base):
     current_health = Column(Integer)
     max_health = Column(Integer)
     current_currency = Column(Integer)
+    # ElevenLabs voice id assigned to this character at world-building time
+    # (or NULL when no ElevenLabs key was configured / no match was found).
+    # The narrator uses a fixed voice id resolved at TTS time and is never
+    # persisted here.
+    voice_id = Column(String(64))
+    # Where this character physically is right now. NULL means the row
+    # predates the travel system; the read path falls back to the seed's
+    # first top-level Location (the historical starting location). Used
+    # by app/services/travel_service.py to drive the /travel endpoint and
+    # by _build_turn_context to anchor the prompt's "Current location".
+    current_location_id = Column(Integer, ForeignKey('Locations.id'))
     seed = relationship('Seed', back_populates='characters')
+    current_location = relationship('Location', foreign_keys=[current_location_id])
 
 
 class Item(Base):
@@ -259,6 +282,59 @@ class Location(Base):
     children = relationship('Location', back_populates='parent')
     events = relationship('Event', back_populates='location')
 
+
+class LocationConnection(Base):
+    """Undirected edge between two top-level locations (settlements).
+
+    Persisted at world-build time from the LLM's ``connections`` payload so
+    the in-game map can render roads/paths/rivers, and so future narrative
+    prompts can reason about how the player travels between settlements.
+    Sub-locations are not linked here -- those cluster inside a settlement
+    and don't need their own edge list.
+    """
+    __tablename__ = 'LocationConnections'
+    # ``Seeds.id`` and ``Locations.id`` are declared ``int unsigned`` in the
+    # legacy ddl.sql; MySQL refuses an FK between an unsigned column and a
+    # plain signed INTEGER (errno 3780) so we mirror the unsigned variant
+    # here for create_all() to produce a compatible schema.
+    id = Column(UnsignedInt, primary_key=True, autoincrement=True)
+    seed_id = Column(UnsignedInt, ForeignKey('Seeds.id'), nullable=False)
+    from_location_id = Column(UnsignedInt, ForeignKey('Locations.id'), nullable=False)
+    to_location_id = Column(UnsignedInt, ForeignKey('Locations.id'), nullable=False)
+    name = Column(String(128))
+    type = Column(String(32), default='road')
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
+    seed = relationship('Seed')
+    from_location = relationship('Location', foreign_keys=[from_location_id])
+    to_location = relationship('Location', foreign_keys=[to_location_id])
+
+
+class GeographicFeature(Base):
+    """A region- or line-shaped natural feature (forest, river, mountain
+    range, lake, ...) belonging to a seed.
+
+    The polygon / polyline geometry is stored as a JSON string of
+    [longitude, latitude] pairs in the same arbitrary 'world units' as
+    ``Location.longitude`` / ``Location.latitude``. ``closed`` flags how
+    the renderer should treat it: True for filled polygons, False for
+    stroked polylines. We use Text + JSON rather than MySQL's spatial
+    types because the dataset is tiny (a few features per seed) and the
+    JSON shape is exactly what the frontend Leaflet layer consumes.
+    """
+    __tablename__ = 'GeographicFeatures'
+    id = Column(UnsignedInt, primary_key=True, autoincrement=True)
+    seed_id = Column(UnsignedInt, ForeignKey('Seeds.id'), nullable=False)
+    name = Column(String(128))
+    type = Column(String(32), default='forest')
+    description = Column(Text)
+    geometry = Column(Text)  # JSON: [[lon, lat], [lon, lat], ...]
+    closed = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
+    seed = relationship('Seed')
+
+
 # QuestSteps
 class QuestStep(Base):
     __tablename__ = 'QuestSteps'
@@ -302,6 +378,55 @@ class TranscriptEntry(Base):
     created_at = Column(DateTime, default=datetime.now)
     seed = relationship('Seed')
     __table_args__ = (Index('idx_transcript_seed_id', 'seed_id', 'id'),)
+
+# Scenario: a typed, mid-turn interaction (battle, dialogue, trade, ...) that
+# replaces the free-form narrator loop with a structured action vocabulary.
+# Only one Scenario per seed is ``active`` at a time; the per-turn route
+# checks for it and routes the player's input through the scenario handler
+# instead of the standard narration prompt while it lives.
+#
+# ``state`` is an opaque JSON blob whose shape is owned by the scenario kind
+# (see app/scenarios/<kind>.py). Storing per-kind data here rather than in
+# kind-specific tables keeps the schema flat for future kinds (crafting,
+# stealth, ...) and lets the substrate stay agnostic of any one kind's
+# internals.
+class Scenario(Base):
+    __tablename__ = 'Scenarios'
+    id = Column(UnsignedInt, primary_key=True, autoincrement=True)
+    seed_id = Column(UnsignedInt, ForeignKey('Seeds.id'), nullable=False)
+    kind = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False, default='active')
+    state = Column(Text)  # JSON owned by the scenario handler
+    summary = Column(Text)  # one-line resolution summary, written on close
+    turn_started = Column(Integer)
+    turn_ended = Column(Integer)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
+    resolved_at = Column(DateTime)
+    seed = relationship('Seed')
+    participants = relationship('ScenarioParticipant', back_populates='scenario',
+                                cascade='all, delete-orphan')
+    __table_args__ = (Index('idx_scenarios_seed_status', 'seed_id', 'status'),)
+
+
+class ScenarioParticipant(Base):
+    """A character taking part in a scenario.
+
+    ``role`` is the slot the participant fills inside the scenario kind
+    (e.g. 'player' / 'npc' for dialogue, 'player' / 'opponent' for battle,
+    'player' / 'merchant' for trade). ``order_index`` orders combatants for
+    initiative or NPCs for display; defaults to insertion order.
+    """
+    __tablename__ = 'ScenarioParticipants'
+    id = Column(UnsignedInt, primary_key=True, autoincrement=True)
+    scenario_id = Column(UnsignedInt, ForeignKey('Scenarios.id'), nullable=False)
+    character_id = Column(Integer, ForeignKey('Characters.id'), nullable=False)
+    role = Column(String(32), nullable=False, default='participant')
+    order_index = Column(SmallInteger, default=0)
+    created_at = Column(DateTime, default=datetime.now)
+    scenario = relationship('Scenario', back_populates='participants')
+    character = relationship('Character')
+
 
 # Settings
 class Settings(Base):

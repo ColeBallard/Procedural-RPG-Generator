@@ -132,9 +132,10 @@ CREATE TABLE `Characters` (
   `current_health` int unsigned DEFAULT NULL,
   `max_health` int unsigned DEFAULT NULL,
   `current_currency` int unsigned DEFAULT NULL,
+  `voice_id` varchar(64) DEFAULT NULL,
   PRIMARY KEY (`id`),
   FOREIGN KEY (`seed_id`) REFERENCES `Seeds`(`id`)
-); 
+);
 
 -- EventCharacters definition
 
@@ -204,7 +205,42 @@ CREATE TABLE `Locations` (
   PRIMARY KEY (`id`),
   FOREIGN KEY (`seed_id`) REFERENCES `Seeds`(`id`),
   FOREIGN KEY (`parent_id`) REFERENCES `Locations`(`id`)
-); 
+);
+
+-- LocationConnections definition
+
+CREATE TABLE `LocationConnections` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `seed_id` int unsigned NOT NULL,
+  `from_location_id` int unsigned NOT NULL,
+  `to_location_id` int unsigned NOT NULL,
+  `name` varchar(128) DEFAULT NULL,
+  `type` varchar(32) DEFAULT 'road',
+  `created_at` datetime DEFAULT NULL,
+  `updated_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_locconn_seed_id` (`seed_id`),
+  FOREIGN KEY (`seed_id`) REFERENCES `Seeds`(`id`),
+  FOREIGN KEY (`from_location_id`) REFERENCES `Locations`(`id`),
+  FOREIGN KEY (`to_location_id`) REFERENCES `Locations`(`id`)
+);
+
+-- GeographicFeatures definition
+
+CREATE TABLE `GeographicFeatures` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `seed_id` int unsigned NOT NULL,
+  `name` varchar(128) DEFAULT NULL,
+  `type` varchar(32) DEFAULT 'forest',
+  `description` text,
+  `geometry` text,
+  `closed` tinyint(1) DEFAULT 1,
+  `created_at` datetime DEFAULT NULL,
+  `updated_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_geofeat_seed_id` (`seed_id`),
+  FOREIGN KEY (`seed_id`) REFERENCES `Seeds`(`id`)
+);
 
 -- QuestSteps definition
 
@@ -243,12 +279,15 @@ CREATE TABLE `Quests` (
 
 CREATE TABLE `Seeds` (
   `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` int unsigned DEFAULT NULL,
   `created_at` datetime DEFAULT NULL,
   `updated_at` datetime DEFAULT NULL,
   `current_date_time` datetime DEFAULT NULL,
   `current_turn` int unsigned DEFAULT NULL,
   `naming_themes` text,
-  PRIMARY KEY (`id`)
+  PRIMARY KEY (`id`),
+  KEY `idx_seeds_user_id` (`user_id`),
+  CONSTRAINT `fk_seeds_user_id` FOREIGN KEY (`user_id`) REFERENCES `Users`(`id`)
 );
 
 -- NameLibrary definition

@@ -21,7 +21,8 @@ class WorldBuilder:
     and existing tests remain unchanged.
     """
 
-    def __init__(self, seed_data, seed_id, session, openai, model, progress_callback=None):
+    def __init__(self, seed_data, seed_id, session, openai, model,
+                 progress_callback=None, elevenlabs_api_key=None):
         self.seed_data = seed_data
         self.seed_id = seed_id
         self.session = session
@@ -30,7 +31,8 @@ class WorldBuilder:
         self.name_service = NameService(session, self.gpt_service)
         self.character_builder = CharacterBuilder(
             seed_data, seed_id, session, self.gpt_service, self.progress_callback,
-            name_service=self.name_service)
+            name_service=self.name_service,
+            elevenlabs_api_key=elevenlabs_api_key)
         self.location_builder = LocationBuilder(
             seed_data, seed_id, session, self.gpt_service, self.progress_callback)
 
@@ -91,6 +93,13 @@ class WorldBuilder:
         results['main_character_relationships'] = (
             self.character_builder.create_main_character_relationships())
 
+        # Phase 3c: anchor the protagonist to the starting location with a
+        # single MC-tagged event. The info-panel events/locations lists
+        # filter by EventCharacter membership, so without this the player
+        # opens onto empty accordions until gameplay produces an event.
+        self.progress_callback("Composing opening event...")
+        results['opening_event'] = self.character_builder.create_opening_event()
+
         # Phase 4: a single narrator-style opening passage that introduces the
         # world, the protagonist and the starting scene. Persisted by the
         # caller as a 'narration' transcript entry so it survives reloads.
@@ -115,12 +124,19 @@ class WorldBuilder:
 
             starting_location = locations[0]
             other_locations = locations[1:]
+            # The opening event (if Phase 3c succeeded) anchors the prose so
+            # the narration matches what the events panel shows. Pass the
+            # literal string "None" when no event was generated so the prompt
+            # branch for a calm arrival kicks in instead of leaving the slot
+            # ambiguous.
+            opening_event = getattr(self.character_builder, 'opening_event', None) or "None"
 
             prompt = WORLD_BUILDING['INTRO_NARRATIVE'].format(
                 seed_data=self.seed_data,
                 character=character,
                 starting_location=starting_location,
                 other_locations=other_locations,
+                opening_event=opening_event,
             )
             text = self.gpt_service.get_response(prompt, temperature=1.0)
             return text.strip() if text else None

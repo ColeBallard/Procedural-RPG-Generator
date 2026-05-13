@@ -1,4 +1,7 @@
 import datetime
+import os
+import random
+import re
 import requests
 import json
 import base64
@@ -8,25 +11,36 @@ import uuid
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from flask import Blueprint, jsonify, render_template, current_app, request, send_from_directory, session, Response, stream_with_context
+from flask import Blueprint, jsonify, render_template, current_app, request, send_from_directory, session, Response, stream_with_context, abort
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from openai import OpenAI
 
 from app.orm import (
-    Seed, User, Settings, Character, Location, Event, Quest,
-    CharacterItem, Item, CharacterSkill, Skill, CharacterStatus, Status,
-    CharacterRelationship,
+    Seed, User, Settings, Character, Location, LocationConnection,
+    GeographicFeature, Event, EventCharacter, Quest, CharacterItem, Item,
+    CharacterSkill, Skill, CharacterStatus, Status, CharacterRelationship,
+    TranscriptEntry, Scenario,
 )
 from app.services import transcript_service
+from app.services import elevenlabs_service
+from app.services import time_service
+from app.services import dice_service
+from app.services import travel_service
+from app.services import world_simulation
 from app.services.gpt_service import GPTService
+from app.services.name_service import NameService
 from app.world_building.world_building import WorldBuilder
-from app.prompt_templates import STEREOTYPE_ANALYSIS, WORLD_BUILDING
+from app.world_building.schemas import TurnResponseOut, ActionAdjudicationOut
+from app.prompt_templates import STEREOTYPE_ANALYSIS, WORLD_BUILDING, DM_ADJUDICATE
+from app import scenarios as _scenarios
 
 # Rate limiter is initialised in createApp(); when it isn't available (the
 # package failed to import) or hasn't been bound to a test app, ``limit``
 # becomes a no-op so the route decorators stay valid in every context.
 from app import limiter as _limiter
 from app import grok_key_store as _grok_key_store
+from app import elevenlabs_key_store as _elevenlabs_key_store
 
 
 def limit(spec):
@@ -77,6 +91,12 @@ def _extract_grok_api_key():
         stored = _grok_key_store.get(user_id)
         if stored:
             return stored
+    # Dev convenience: when not in production, createApp() loads GROK_API_KEY
+    # from .env into DEV_GROK_API_KEY so the developer doesn't have to push
+    # the key via the UI on every restart. Forced to None in production.
+    dev_key = current_app.config.get('DEV_GROK_API_KEY')
+    if dev_key:
+        return dev_key
     # Test/legacy fallback: only honoured when GROK_API_KEY_REQUIRED is off
     # (i.e. the unit-test apps that build their own Flask instance without
     # the gate). The production app always sets the gate, so this branch is
@@ -87,6 +107,22 @@ def _extract_grok_api_key():
         if key:
             return key.strip()
     return ''
+
+
+def _extract_elevenlabs_api_key():
+    """Look up the caller's ElevenLabs key from the in-memory store.
+
+    Mirrors ``_extract_grok_api_key`` but is lookup-only: there is no
+    ``ELEVENLABS_API_KEY_REQUIRED`` gate because TTS is an opt-in UX layer
+    that simply degrades gracefully (silent / cached-only) when no key is
+    bound. Falls back to ``DEV_ELEVENLABS_API_KEY`` for the dev workflow.
+    """
+    user_id = session.get('user_id')
+    if user_id is not None:
+        stored = _elevenlabs_key_store.get(user_id)
+        if stored:
+            return stored
+    return current_app.config.get('DEV_ELEVENLABS_API_KEY')
 
 
 def grok_api_key_required(f):
@@ -107,12 +143,67 @@ def grok_api_key_required(f):
         return f(*args, **kwargs)
     return wrapped
 
+
+def _seed_owned_by_caller(db_session, seed_id):
+    """Return the Seed if it exists and belongs to the caller, else ``None``.
+
+    Caller pattern::
+
+        seed = _seed_owned_by_caller(db_session, seed_id)
+        if seed is None:
+            return jsonify({'error': 'Seed not found'}), 404
+
+    A 404 (rather than 403) is the right response for a missing-or-foreign
+    seed: returning 403 would leak the existence of seed ids belonging to
+    other users and let an attacker enumerate the seed-id space.
+
+    When ``LOGIN_REQUIRED`` is off (test apps that mount the blueprint
+    without the auth gate) ownership is *not* enforced and the helper just
+    returns the seed if the row exists, mirroring the lookup-by-id
+    behaviour the existing tests rely on. In production the gate is on and
+    orphan seeds (``user_id IS NULL``, e.g. legacy rows from before the
+    migration) are reported as not-found so they cannot be read by every
+    signed-in user.
+    """
+    seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+    if seed is None:
+        return None
+    if not current_app.config.get('LOGIN_REQUIRED'):
+        return seed
+    user_id = session.get('user_id')
+    if user_id is None or seed.user_id is None or seed.user_id != user_id:
+        return None
+    return seed
+
+
+def _seed_id_owned_by_caller(db_session, seed_id):
+    """Same ownership check as ``_seed_owned_by_caller`` but only returns
+    a boolean. Used by routes that don't otherwise need the Seed row."""
+    return _seed_owned_by_caller(db_session, seed_id) is not None
+
 @main.route('/', methods=['GET', 'POST'])
 def index():
     return render_template('index.html')
 
+# Frontend Handlebars templates fetched at runtime by main.js. Anything
+# not on this allow-list (e.g. index.html itself, or any future server
+# scaffolding template) is rejected so the route can't be turned into a
+# generic file-disclosure primitive against the templates directory.
+_TEMPLATE_ALLOWLIST = frozenset({
+    'narrativeItem.hbs',
+    'location.html',
+    'event.html',
+    'interactingCharacter.html',
+    'quest.html',
+    'item.html',
+})
+
+
 @main.route('/templates/<path:filename>')
+@login_required
 def serve_template(filename):
+    if filename not in _TEMPLATE_ALLOWLIST:
+        abort(404)
     return send_from_directory('templates', filename)
 
 @main.route('/create_seed', methods=['POST'])
@@ -120,31 +211,37 @@ def serve_template(filename):
 @limit("30 per hour")
 def create_seed():
     Session = current_app.config['SESSION_FACTORY']
-    session = Session()
+    db_session = Session()
+
+    # Bind every new seed to the caller so the per-seed routes can later
+    # reject foreign access. Tests build their own Flask app without
+    # LOGIN_REQUIRED and have no session user_id; the column stays NULL
+    # for them, matching the legacy behaviour the existing fixtures rely on.
+    owner_id = session.get('user_id')
 
     max_retries = 5
     attempts = 0
 
     while attempts < max_retries:
         try:
-            new_seed = Seed()
-            session.add(new_seed)
-            session.commit()
+            new_seed = Seed(user_id=owner_id)
+            db_session.add(new_seed)
+            db_session.commit()
             return jsonify({"message": "Seed created successfully", "status": "success", "seed_id": new_seed.id}), 201
         except IntegrityError:
-            session.rollback()  # Rollback the session to a clean state
+            db_session.rollback()  # Rollback the session to a clean state
             attempts += 1
             if attempts == max_retries:
                 return jsonify({"message": "Failed to create a seed after multiple attempts", "status": "failure"}), 500
         finally:
-            session.close()
+            db_session.close()
 
 @main.route('/initialize_world_building', methods=['POST'])
 @login_required
 @grok_api_key_required
 @limit("10 per hour")
 def initialize_world_building():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     seed_id = data.get('seed_id')
     seed_data = data.get('seed_data')
     grok_api_key = _extract_grok_api_key()
@@ -152,22 +249,33 @@ def initialize_world_building():
     Session = current_app.config['SESSION_FACTORY']
     db_session = Session()
 
+    # Reject world-building against a seed the caller does not own so an
+    # attacker cannot overwrite another user's freshly-created blank seed.
+    if _seed_owned_by_caller(db_session, seed_id) is None:
+        db_session.close()
+        return jsonify({'error': 'Seed not found'}), 404
+
     # Build a per-request OpenAI client so concurrent requests with different
     # API keys cannot stomp on each other via shared mutable state. Mirrors
     # the streaming route's pattern.
     openai_client = OpenAI(api_key=grok_api_key, base_url="https://api.x.ai/v1")
 
     try:
-        world_builder = WorldBuilder(seed_data, seed_id, db_session, openai_client, current_app.config['min_grok'])
+        world_builder = WorldBuilder(
+            seed_data, seed_id, db_session, openai_client,
+            current_app.config['min_grok'],
+            elevenlabs_api_key=_extract_elevenlabs_api_key(),
+        )
 
         # Orchestrate the world-building process by calling the build_world method
         results = world_builder.build_world()
 
         # Optionally, you can check for errors or partial failures in 'results'
         return jsonify(results), 200
-    except Exception as e:
+    except Exception:
         db_session.rollback()
-        return jsonify({"message": "An error occurred during world building", "error": str(e)}), 500
+        current_app.logger.exception('initialize_world_building failed for seed_id=%s', seed_id)
+        return jsonify({"message": "An error occurred during world building"}), 500
     finally:
         db_session.close()
 
@@ -176,16 +284,26 @@ def initialize_world_building():
 @grok_api_key_required
 @limit("10 per hour")
 def initialize_world_building_stream():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     seed_id = data.get('seed_id')
     seed_data = data.get('seed_data')
     grok_api_key = _extract_grok_api_key()
+    elevenlabs_api_key = _extract_elevenlabs_api_key()
 
     # Capture the real app object and config values up front so the background
     # thread does not depend on the request-bound current_app proxy.
     app = current_app._get_current_object()
     session_factory = app.config['SESSION_FACTORY']
     model = app.config['min_grok']
+
+    # Ownership pre-check: reject world-building against a seed the caller
+    # does not own before spinning up the SSE worker thread.
+    _ownership_check_session = session_factory()
+    try:
+        if _seed_owned_by_caller(_ownership_check_session, seed_id) is None:
+            return jsonify({'error': 'Seed not found'}), 404
+    finally:
+        _ownership_check_session.close()
 
     # Build a per-request OpenAI client so concurrent requests with different
     # API keys cannot stomp on each other via shared mutable state.
@@ -221,32 +339,38 @@ def initialize_world_building_stream():
                     db_session,
                     openai_client,
                     model,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    elevenlabs_api_key=elevenlabs_api_key,
                 )
 
                 results = world_builder.build_world()
 
-                # Persist the opening narration (if produced) as a separate
-                # transcript entry so it renders with narration styling and
-                # is replayed on refresh. WorldBuilder returns it in-band so
-                # the orchestrator stays free of session-factory plumbing.
+                # Persist the opening narration (if produced) as a sequence
+                # of paragraph-sized transcript entries so it renders with
+                # narration styling, gets replayed on refresh, and lets the
+                # TTS layer synthesize one short paragraph at a time instead
+                # of blocking on the whole opening passage at once.
                 intro_narration = results.pop('intro_narration', None) if isinstance(results, dict) else None
                 if intro_narration:
-                    transcript_service.add_entry(
-                        session_factory, seed_id,
-                        transcript_service.KIND_NARRATION, intro_narration,
-                        speaker='Narrator',
-                    )
+                    for paragraph in _split_paragraphs(intro_narration):
+                        transcript_service.add_entry(
+                            session_factory, seed_id,
+                            transcript_service.KIND_NARRATION, paragraph,
+                            speaker='Narrator',
+                        )
 
                 q.put({'type': 'complete', 'results': results})
-            except Exception as e:
+            except Exception:
                 db_session.rollback()
+                current_app.logger.exception(
+                    'initialize_world_building_stream failed for seed_id=%s', seed_id)
+                generic = 'World building failed; please retry.'
                 transcript_service.add_entry(
                     session_factory, seed_id,
-                    transcript_service.KIND_WORLD_BUILDING, str(e),
+                    transcript_service.KIND_WORLD_BUILDING, generic,
                     status='error',
                 )
-                q.put({'type': 'error', 'message': str(e)})
+                q.put({'type': 'error', 'message': generic})
             finally:
                 db_session.close()
                 q.put(None)
@@ -298,15 +422,16 @@ def get_settings():
 
         session.close()
         return jsonify(settings)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('get_settings failed')
+        return jsonify({'error': 'Failed to load settings.'}), 500
 
 @main.route('/api/settings/save', methods=['POST'])
 @login_required
 def save_settings():
     """Save settings to database"""
     try:
-        data = request.json
+        data = request.get_json(silent=True) or {}
         Session = current_app.config['SESSION_FACTORY']
         session = Session()
 
@@ -332,17 +457,30 @@ def save_settings():
 
         session.close()
         return jsonify({'status': 'success', 'message': 'Settings saved successfully'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('save_settings failed')
+        return jsonify({'status': 'error', 'message': 'Failed to save settings.'}), 500
 
 @main.route('/api/seeds', methods=['GET'])
 @login_required
 def list_seeds():
-    """Return all saved seeds with their main character name and creation time."""
+    """Return the caller's saved seeds with their main character name and creation time.
+
+    Filtered by ``Seed.user_id`` against the authenticated session so a
+    user only ever sees their own saves. Tests build their own Flask app
+    without ``LOGIN_REQUIRED`` and have no session user; the filter is
+    skipped there to keep the existing fixtures working.
+    """
     Session = current_app.config['SESSION_FACTORY']
     db_session = Session()
     try:
-        seeds = db_session.query(Seed).order_by(Seed.created_at.desc()).all()
+        query = db_session.query(Seed)
+        if current_app.config.get('LOGIN_REQUIRED'):
+            user_id = session.get('user_id')
+            # Defensive: login_required already enforces session presence.
+            # The == filter naturally excludes orphan (NULL user_id) rows.
+            query = query.filter(Seed.user_id == user_id)
+        seeds = query.order_by(Seed.created_at.desc()).all()
         result = []
         for seed in seeds:
             main_char = (
@@ -358,8 +496,9 @@ def list_seeds():
                 'main_character_name': main_char.name if main_char else None,
             })
         return jsonify({'seeds': result}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('list_seeds failed')
+        return jsonify({'error': 'Failed to load seeds.'}), 500
     finally:
         db_session.close()
 
@@ -373,41 +512,62 @@ def get_world(seed_id):
     Session = current_app.config['SESSION_FACTORY']
     db_session = Session()
     try:
-        seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+        seed = _seed_owned_by_caller(db_session, seed_id)
         if not seed:
             return jsonify({'error': 'Seed not found'}), 404
-
-        locations = [
-            {
-                'id': loc.id,
-                'name': loc.name,
-                'description': loc.description or '',
-                'type': loc.type,
-                'climate': loc.climate,
-                'terrain': loc.terrain,
-                'parent_id': loc.parent_id,
-            }
-            for loc in db_session.query(Location).filter(Location.seed_id == seed_id).all()
-        ]
-
-        events = [
-            {
-                'id': ev.id,
-                'name': ev.name,
-                'description': ev.description or '',
-                'type': ev.type,
-                'location_id': ev.location_id,
-                'start_turn': ev.start_turn,
-                'end_turn': ev.end_turn,
-            }
-            for ev in db_session.query(Event).filter(Event.seed_id == seed_id).all()
-        ]
 
         main_character = (
             db_session.query(Character)
             .filter(Character.seed_id == seed_id, Character.main_character == True)
             .first()
         )
+
+        # The info-panel events list is intentionally MC-centric: we only
+        # surface events the protagonist actually participated in (joined via
+        # EventCharacter). When no main character exists yet the list is empty.
+        events = []
+        if main_character:
+            events = [
+                {
+                    'id': ev.id,
+                    'name': ev.name,
+                    'description': ev.description or '',
+                    'type': ev.type,
+                    'location_id': ev.location_id,
+                    'start_turn': ev.start_turn,
+                    'end_turn': ev.end_turn,
+                }
+                for ev in db_session.query(Event)
+                .join(EventCharacter, EventCharacter.event_id == Event.id)
+                .filter(Event.seed_id == seed_id,
+                        EventCharacter.character_id == main_character.id)
+                .distinct()
+                .all()
+            ]
+
+        # Locations follow the same MC-centric rule as events: only surface
+        # places where at least one MC-involved event took place. Without a
+        # main character (or matching events) the list is empty.
+        mc_event_location_ids = {
+            ev['location_id'] for ev in events if ev['location_id'] is not None
+        }
+        locations = []
+        if mc_event_location_ids:
+            locations = [
+                {
+                    'id': loc.id,
+                    'name': loc.name,
+                    'description': loc.description or '',
+                    'type': loc.type,
+                    'climate': loc.climate,
+                    'terrain': loc.terrain,
+                    'parent_id': loc.parent_id,
+                }
+                for loc in db_session.query(Location)
+                .filter(Location.seed_id == seed_id,
+                        Location.id.in_(mc_event_location_ids))
+                .all()
+            ]
 
         # Fetch MC's outbound relationships up front so we can both annotate
         # the NPC list with acquaintance level and reuse the rows when
@@ -517,9 +677,33 @@ def get_world(seed_id):
 
         transcript = transcript_service.list_for_seed(db_session, seed_id)
 
+        # Resume an in-flight scenario on page load so the structured panel
+        # remounts where the player left off. ``None`` means free-form turn.
+        active_scenario = _scenarios.active_scenario_for(db_session, seed_id)
+        scenario_view = (_scenarios.scenario_view(db_session, active_scenario)
+                         if active_scenario is not None else None)
+
+        # Phase 4 (travel): tell the frontend where the MC currently is and
+        # which destinations are reachable from there with their pre-computed
+        # time costs. Falls back to the seed's first top-level location for
+        # legacy MC rows whose ``current_location_id`` is still NULL.
+        current_loc = travel_service.resolve_current_location(
+            db_session, seed_id, main_character) if main_character else None
+        current_location_view = None
+        destinations = []
+        if current_loc is not None:
+            current_location_view = {
+                'id': current_loc.id, 'name': current_loc.name,
+                'type': current_loc.type, 'terrain': current_loc.terrain,
+                'parent_id': current_loc.parent_id,
+            }
+            destinations = travel_service.reachable_destinations(
+                db_session, seed_id, current_loc)
+
         return jsonify({
             'seed_id': seed_id,
             'current_turn': seed.current_turn,
+            'clock': time_service.serialize_clock(seed),
             'main_character': main_character_data,
             'locations': locations,
             'events': events,
@@ -531,9 +715,102 @@ def get_world(seed_id):
             'stats': stats,
             'quests': quests,
             'transcript': transcript,
+            'scenario': scenario_view,
+            'current_location': current_location_view,
+            'destinations': destinations,
         }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('get_world failed for seed_id=%s', seed_id)
+        return jsonify({'error': 'Failed to load world.'}), 500
+    finally:
+        db_session.close()
+
+
+@main.route('/api/world/<int:seed_id>/map', methods=['GET'])
+@login_required
+@grok_api_key_required
+def get_world_map(seed_id):
+    """Return the full geography for a seed: every location with its
+    coordinates / parent / type, plus the inter-settlement connections.
+
+    Unlike ``/api/world/<seed_id>``, this endpoint is NOT filtered by
+    MC-event participation: the map widget shows the whole known world,
+    so the player can see settlements they haven't visited yet alongside
+    the ones they have. Sub-locations are returned with their parent_id
+    so the frontend can drill into a settlement on click.
+    """
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+    try:
+        seed = _seed_owned_by_caller(db_session, seed_id)
+        if not seed:
+            return jsonify({'error': 'Seed not found'}), 404
+
+        all_locs = (
+            db_session.query(Location)
+            .filter(Location.seed_id == seed_id)
+            .all()
+        )
+        locations = [
+            {
+                'id': loc.id,
+                'name': loc.name,
+                'description': loc.description or '',
+                'longitude': loc.longitude,
+                'latitude': loc.latitude,
+                'type': loc.type,
+                'climate': loc.climate,
+                'terrain': loc.terrain,
+                'parent_id': loc.parent_id,
+            }
+            for loc in all_locs
+        ]
+
+        connections = [
+            {
+                'id': c.id,
+                'from_location_id': c.from_location_id,
+                'to_location_id': c.to_location_id,
+                'name': c.name or '',
+                'type': c.type or 'road',
+            }
+            for c in db_session.query(LocationConnection)
+            .filter(LocationConnection.seed_id == seed_id)
+            .all()
+        ]
+
+        # Natural geography (forests, rivers, mountain ranges, lakes, ...).
+        # Geometry is stored as JSON text so the frontend can hand the list
+        # straight to Leaflet; a malformed row is dropped rather than 500'd
+        # because the rest of the map should still render.
+        features = []
+        for f in (
+            db_session.query(GeographicFeature)
+            .filter(GeographicFeature.seed_id == seed_id)
+            .all()
+        ):
+            try:
+                points = json.loads(f.geometry) if f.geometry else []
+            except (ValueError, TypeError):
+                continue
+            features.append({
+                'id': f.id,
+                'name': f.name or '',
+                'type': f.type or 'forest',
+                'description': f.description or '',
+                'points': points,
+                'closed': bool(f.closed),
+            })
+
+        return jsonify({
+            'seed_id': seed_id,
+            'locations': locations,
+            'connections': connections,
+            'features': features,
+        }), 200
+    except Exception:
+        current_app.logger.exception('get_world_map failed for seed_id=%s', seed_id)
+        return jsonify({'error': 'Failed to load world map.'}), 500
     finally:
         db_session.close()
 
@@ -579,8 +856,18 @@ def _build_turn_context(db_session, seed_id):
             'terrain': loc.terrain,
         }
 
-    starting_location = _loc(locations[0])
-    other_locations = [_loc(l) for l in locations[1:]]
+    # The "starting_location" prompt slot historically meant locations[0];
+    # with the travel system in play it now means the MC's CURRENT
+    # location, falling back to locations[0] for legacy seeds whose
+    # ``current_location_id`` was never set. The prompt key name is
+    # preserved so existing templates keep working.
+    current_loc = travel_service.resolve_current_location(
+        db_session, seed_id, main_character) or locations[0]
+    starting_location = _loc(current_loc)
+    other_locations = [
+        _loc(l) for l in locations
+        if l.id != current_loc.id and l.id != getattr(current_loc, 'parent_id', None)
+    ]
 
     # Pull the trailing transcript and drop world-building progress lines so
     # the prompt focuses on the actual story beats the player has seen.
@@ -599,12 +886,59 @@ def _build_turn_context(db_session, seed_id):
         transcript_lines.append(f"[{prefix}] {entry['text']}")
     transcript_text = '\n'.join(transcript_lines) if transcript_lines else '(no prior beats)'
 
+    # Compact roster of every NPC the world already knows about. The LLM
+    # uses this to (a) attribute dialogue to existing characters by their
+    # canonical name and (b) decide whether a character needs to be newly
+    # introduced via the 'new_characters' field of the structured response.
+    npcs = (
+        db_session.query(Character)
+        .filter(Character.seed_id == seed_id, Character.main_character == False)
+        .all()
+    )
+    if npcs:
+        existing_lines = []
+        for c in npcs:
+            bits = [c.name]
+            if c.race:
+                bits.append(c.race)
+            if c.gender is True:
+                bits.append('male')
+            elif c.gender is False:
+                bits.append('female')
+            if c.alive is False:
+                bits.append('deceased')
+            existing_lines.append(' - ' + ', '.join(bits))
+        existing_characters_text = '\n'.join(existing_lines)
+    else:
+        existing_characters_text = '(none)'
+
+    seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+    world_clock = time_service.format_clock(time_service.now_world(seed))
+
+    # Phase 5: surface a few recent off-screen events so the narrator /
+    # NPCs can reference world news the player hasn't witnessed first
+    # hand. Events at the MC's current location are filtered out -- the
+    # player saw those play out, they're not "news from afar".
+    offscreen = world_simulation.recent_offscreen_events(
+        db_session, seed_id, current_loc.id, limit=4)
+    if offscreen:
+        ev_lines = []
+        for ev in offscreen:
+            loc_name = ev.location.name if ev.location is not None else '?'
+            ev_lines.append(f" - {ev.name} at {loc_name}: {ev.description}")
+        recent_events_text = '\n'.join(ev_lines)
+    else:
+        recent_events_text = '(none)'
+
     return {
         'seed_data': '',  # filled in by callers from request body when relevant
         'character': character_payload,
         'starting_location': starting_location,
         'other_locations': other_locations,
         'transcript': transcript_text,
+        'existing_characters': existing_characters_text,
+        'world_clock': world_clock or '(unset)',
+        'recent_events': recent_events_text,
     }
 
 
@@ -641,16 +975,325 @@ def get_suggestions(seed_id):
     Session = current_app.config['SESSION_FACTORY']
     db_session = Session()
     try:
+        if _seed_owned_by_caller(db_session, seed_id) is None:
+            return jsonify({'error': 'Seed not found'}), 404
         context = _build_turn_context(db_session, seed_id)
         if context is None:
             return jsonify({'suggestions': []}), 200
         gpt_service = _make_gpt_service()
         suggestions = _generate_suggestions(gpt_service, context)
         return jsonify({'suggestions': suggestions}), 200
-    except Exception as e:
-        return jsonify({'suggestions': [], 'error': str(e)}), 200
+    except Exception:
+        current_app.logger.exception('get_suggestions failed for seed_id=%s', seed_id)
+        return jsonify({'suggestions': []}), 200
     finally:
         db_session.close()
+
+
+def _create_dynamic_character(db_session, seed_id, payload, *,
+                              elevenlabs_api_key=None, current_dt=None,
+                              name_service=None):
+    """Persist a Character introduced mid-game by the LLM.
+
+    Returns the freshly created Character on success, or ``None`` when a
+    same-named character already exists for this seed (case-insensitive)
+    or the name is empty. Voice assignment is best-effort: missing key /
+    upstream failure leaves ``voice_id`` as NULL and the TTS layer falls
+    back to the narrator voice at playback time.
+
+    When ``name_service`` is supplied and the seed has naming themes
+    assigned, the LLM-supplied name is overridden with one drawn from the
+    ``NameLibrary``. This mirrors ``CharacterBuilder._persist_npc`` so
+    mid-game NPCs share the same naming aesthetic as world-built ones.
+    """
+    llm_name = (getattr(payload, 'name', '') or '').strip()
+    if not llm_name:
+        return None
+
+    # If the LLM tries to "introduce" a character whose name already
+    # exists for this seed, treat it as a no-op so dialogue lines that
+    # reference the existing character resolve to the canonical row.
+    existing = (
+        db_session.query(Character)
+        .filter(Character.seed_id == seed_id,
+                func.lower(Character.name) == llm_name.lower())
+        .first()
+    )
+    if existing:
+        return None
+
+    name = llm_name
+    if name_service is not None:
+        try:
+            themes = name_service.get_themes_for_seed(seed_id)
+            if themes:
+                seeded = name_service.random_name(
+                    themes, gender=payload.gender, category='first')
+                if seeded:
+                    name = seeded
+        except Exception as e:
+            print(f"Library name lookup failed for dynamic "
+                  f"character '{llm_name}': {e}")
+
+    # The library is a finite pool, so a popular theme can produce
+    # collisions across consecutive turns; fall back to the LLM name when
+    # the override would clash with an existing character on this seed.
+    if name != llm_name:
+        collision = (
+            db_session.query(Character)
+            .filter(Character.seed_id == seed_id,
+                    func.lower(Character.name) == name.lower())
+            .first()
+        )
+        if collision:
+            name = llm_name
+
+    voice_id = None
+    if elevenlabs_api_key:
+        try:
+            voice_id = elevenlabs_service.find_voice_for_character(
+                elevenlabs_api_key,
+                gender=payload.gender,
+                date_of_birth=payload.date_of_birth,
+                current_dt=current_dt,
+                race=payload.race,
+                search_text=getattr(payload, 'description', None) or None,
+            )
+        except Exception as e:
+            print(f"Voice search failed for dynamic character '{name}': {e}")
+
+    # Light-weight stat block mirroring CharacterBuilder._persist_npc so
+    # ad-hoc characters can participate in the same combat / progression
+    # systems as world-built NPCs without a second pass.
+    level = random.randint(1, 3)
+    char = Character(
+        seed_id=seed_id,
+        main_character=False,
+        alive=True,
+        name=name,
+        date_of_birth=payload.date_of_birth,
+        race=payload.race,
+        gender=payload.gender,
+        level=level,
+        exp_points=100 * ((2 ** (level - 1)) - 1),
+        strength=random.randint(4, 16) + level,
+        speed=random.randint(4, 16) + level,
+        agility=random.randint(4, 16) + level,
+        intelligence=random.randint(4, 16) + level,
+        wisdom=random.randint(4, 16) + level,
+        charisma=random.randint(4, 16) + level,
+        current_health=100 * level,
+        max_health=100 * level,
+        current_currency=random.randint(0, 50),
+        voice_id=voice_id,
+    )
+    db_session.add(char)
+    db_session.commit()
+    db_session.refresh(char)
+
+    # Seed an MC <-> NPC acquaintance row so the new character isn't read
+    # back as an "unknown" stranger by the world payload (familiarity == 0
+    # is reserved for that). Mirrors the defaults used by
+    # CharacterBuilder.create_main_character_relationships at world build
+    # time but with neutral stats and familiarity=1 to reflect that the
+    # two have only just met. ``== True`` matches the comparison the rest
+    # of the codebase (and the MC insert path) uses; ``is_(True)`` would
+    # generate ``IS TRUE`` SQL which is not portable across every backend
+    # the app may run on. Failure here is non-fatal: the character itself
+    # is already persisted and gameplay can continue, but we log the
+    # traceback so the silent dropout shows up in the server logs.
+    try:
+        mc = (
+            db_session.query(Character)
+            .filter(Character.seed_id == seed_id,
+                    Character.main_character == True)  # noqa: E712
+            .first()
+        )
+        if mc is None:
+            current_app.logger.warning(
+                "Skipping MC relationship for dynamic character '%s' on "
+                "seed %s: main character row not found.", name, seed_id)
+        elif mc.id != char.id:
+            db_session.add(CharacterRelationship(
+                seed_id=seed_id,
+                character_id=mc.id,
+                related_character_id=char.id,
+                relationship_type='acquaintance',
+                attraction=5, respect=5, trust=5,
+                familiarity=1, anger=5, fear=5,
+            ))
+            db_session.commit()
+    except Exception:
+        db_session.rollback()
+        current_app.logger.exception(
+            "Failed to seed MC relationship for dynamic character '%s' "
+            "on seed %s.", name, seed_id)
+
+    return char
+
+
+def _split_paragraphs(text):
+    """Break narrator prose into paragraph chunks.
+
+    Each paragraph is persisted (and TTS'd) as its own transcript entry so
+    the audio for a multi-paragraph beat starts playing as soon as the
+    first paragraph is rendered, rather than waiting for ElevenLabs to
+    synthesize the whole block. Splitting on blank lines matches how the
+    LLM is asked to format narration in the prompt templates.
+    """
+    if not text:
+        return []
+    parts = [p.strip() for p in re.split(r'\n\s*\n', text)]
+    return [p for p in parts if p]
+
+
+def _resolve_dialogue_speaker(db_session, seed_id, raw_speaker, name_lookup):
+    """Map a dialogue speaker string to its canonical Character.name.
+
+    The LLM occasionally drops case or trailing whitespace; ``name_lookup``
+    is a {lower(name): canonical_name} dict prebuilt from the seed's
+    characters (including ones created earlier in this turn) so we don't
+    re-query the DB per line. Falls back to the trimmed raw value when
+    nothing matches; the TTS layer will then default to the narrator voice.
+    """
+    cleaned = (raw_speaker or '').strip()
+    if not cleaned:
+        return ''
+    return name_lookup.get(cleaned.lower(), cleaned)
+
+
+def _dm_adjudicate(gpt_service, context):
+    """Run the DM ruling pass on the player's action.
+
+    Returns ``(ruling, error)`` where ``ruling`` is an
+    ``ActionAdjudicationOut`` (or a fallback no-check ruling on parse
+    failure) and ``error`` is a human string when the call itself blew
+    up. Failure is non-fatal: the turn proceeds as a free auto-success
+    when the DM cannot be reached so a flaky model does not strand the
+    player.
+    """
+    try:
+        prompt = DM_ADJUDICATE.format(**context)
+        ruling = gpt_service.get_structured(
+            prompt, ActionAdjudicationOut,
+            max_attempts=2, temperature=0.3,
+        )
+    except Exception as e:
+        return _default_ruling(), str(e)
+    if ruling is None:
+        return _default_ruling(), 'DM returned an invalid payload.'
+    return ruling, None
+
+
+def _default_ruling():
+    """Auto-success ruling used when the DM call fails or is skipped."""
+    return ActionAdjudicationOut(
+        requires_check=False, ability='strength', dc=10,
+        proficient=False, advantage=False, disadvantage=False,
+        time_cost_minutes=time_service.DEFAULT_TURN_MINUTES, reason='',
+    )
+
+
+def _resolve_check(db_session, seed_id, character, ruling, *,
+                   session_factory, current_turn):
+    """Roll the check the DM asked for and persist DM + dice transcript lines.
+
+    Returns ``(check_result, transcript_entries)`` where ``check_result``
+    is a ``CheckResult`` (or ``None`` when the ruling didn't ask for a
+    check) and ``transcript_entries`` is the JSON-friendly list of new
+    entries to surface to the frontend in the turn response.
+    """
+    entries = []
+    # DM ruling line first so the player sees WHY a roll is happening
+    # before they see the dice land. Empty reasons are skipped.
+    reason = (ruling.reason or '').strip()
+    if reason:
+        dm_entry = transcript_service.add_entry(
+            session_factory, seed_id,
+            transcript_service.KIND_DM, reason,
+            turn=current_turn, speaker='DM',
+            meta={
+                'requires_check': bool(ruling.requires_check),
+                'ability': ruling.ability,
+                'dc': int(ruling.dc),
+                'proficient': bool(ruling.proficient),
+                'advantage': bool(ruling.advantage),
+                'disadvantage': bool(ruling.disadvantage),
+                'time_cost_minutes': int(ruling.time_cost_minutes or 0),
+            },
+        )
+        if dm_entry is not None:
+            entries.append({
+                'id': dm_entry.id,
+                'kind': transcript_service.KIND_DM,
+                'speaker': 'DM',
+                'text': reason,
+            })
+    if not ruling.requires_check or character is None:
+        return None, entries
+
+    result = dice_service.perform_check(
+        character, ruling.ability, ruling.dc,
+        proficient=ruling.proficient,
+        advantage=ruling.advantage, disadvantage=ruling.disadvantage,
+        description=reason,
+    )
+    line = dice_service.format_check(result)
+    dice_entry = transcript_service.add_entry(
+        session_factory, seed_id,
+        transcript_service.KIND_DICE, line,
+        turn=current_turn, speaker='DM',
+        meta=result.to_meta(),
+    )
+    if dice_entry is not None:
+        entries.append({
+            'id': dice_entry.id,
+            'kind': transcript_service.KIND_DICE,
+            'speaker': 'DM',
+            'text': line,
+            # Forward the structured roll so the frontend can flash the
+            # d20 overlay with the actual face / verdict / colour ramp
+            # without having to re-parse ``line``.
+            'meta': result.to_meta(),
+        })
+    return result, entries
+
+
+def _format_dm_outcome(ruling, check_result):
+    """Render the DM ruling + dice verdict as a short brief for the narrator.
+
+    Kept terse so the narration prompt stays cheap. The narrator reads
+    this and is instructed to honour the verdict verbatim -- no second
+    rolls, no overturning a failure into a success.
+    """
+    if ruling is None:
+        return ('No check required; the action proceeds as declared. '
+                'Narrate the outcome as a routine success.')
+    if not ruling.requires_check or check_result is None:
+        cost = int(ruling.time_cost_minutes or 0)
+        cost_bit = f' (~{cost} minutes elapse)' if cost else ''
+        return ('No check required; the action proceeds as declared'
+                f'{cost_bit}. Narrate the outcome as a routine success.')
+    bits = [
+        f"Ability: {check_result.ability.title()}",
+        f"DC: {check_result.dc}",
+        f"d20: {check_result.raw_d20}",
+        f"Total: {check_result.total}",
+    ]
+    if check_result.critical_success:
+        verdict = 'CRITICAL SUCCESS -- describe an unusually clean, lucky outcome.'
+    elif check_result.critical_failure:
+        verdict = ('CRITICAL FAILURE -- describe a notably bad outcome '
+                   '(complication, fumble, or worse).')
+    elif check_result.success:
+        verdict = 'SUCCESS -- the action lands as intended.'
+    else:
+        verdict = ('FAILURE -- the action does not work; describe the '
+                   'attempt and the consequence, but do NOT claim success.')
+    cost = int(ruling.time_cost_minutes or 0)
+    if cost:
+        bits.append(f"Time elapsed: ~{cost} minutes")
+    return ' | '.join(bits) + '\n' + verdict
 
 
 @main.route('/api/seed/<int:seed_id>/turn', methods=['POST'])
@@ -658,14 +1301,15 @@ def get_suggestions(seed_id):
 @grok_api_key_required
 @limit("60 per minute")
 def submit_turn(seed_id):
-    """Accept a player action, persist it, and return the narrator's reply.
+    """Accept a player action, persist it, and return the turn's transcript.
 
-    Persists the player's input as a ``player_input`` transcript entry, asks
-    the LLM for a short continuation as the narrator, persists that as a
-    ``narration`` entry, and returns both alongside a fresh batch of
-    suggestions for the next turn.
+    Persists the player's input as a ``player_input`` entry, asks the LLM
+    for a structured continuation (narration prose, per-character dialogue
+    lines, and any newly introduced characters), persists each piece as a
+    separate transcript entry attributed to the right speaker, and returns
+    the full ordered batch of new entries alongside a fresh suggestion list.
     """
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     action = (data.get('action') or '').strip()
     seed_data = data.get('seed_data') or ''
 
@@ -677,9 +1321,20 @@ def submit_turn(seed_id):
     db_session = Session()
 
     try:
-        seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+        seed = _seed_owned_by_caller(db_session, seed_id)
         if not seed:
             return jsonify({'success': False, 'message': 'Seed not found.'}), 404
+
+        # If a scenario is in flight, the free-form turn loop is gated --
+        # the player must drive it to a resolution (or abort it) through
+        # the scenario routes before the narrator picks up the story.
+        active = _scenarios.active_scenario_for(db_session, seed_id)
+        if active is not None:
+            return jsonify({
+                'success': False,
+                'message': 'A scenario is in progress; resolve it first.',
+                'scenario': _scenarios.scenario_view(db_session, active),
+            }), 409
 
         turn = seed.current_turn or 1
 
@@ -701,43 +1356,535 @@ def submit_turn(seed_id):
         context['player_action'] = action
 
         gpt_service = _make_gpt_service()
+
+        # Phase 3: DM adjudication runs FIRST. The DM picks an ability +
+        # DC + time cost, the substrate rolls the dice deterministically,
+        # and the verdict is then handed to the narrator so the prose
+        # always matches the mechanical result. Both the DM ruling line
+        # and the dice roll land in the transcript ahead of the
+        # narration so the player sees them in the order they happened.
+        ruling, ruling_err = _dm_adjudicate(gpt_service, context)
+        if ruling_err:
+            current_app.logger.warning(
+                "DM adjudication fell back to auto-success on seed %s: %s",
+                seed_id, ruling_err,
+            )
+        main_character = (
+            db_session.query(Character)
+            .filter(Character.seed_id == seed_id,
+                    Character.main_character == True)  # noqa: E712
+            .first()
+        )
+        check_result, dm_entries = _resolve_check(
+            db_session, seed_id, main_character, ruling,
+            session_factory=session_factory, current_turn=turn,
+        )
+        context['dm_outcome'] = _format_dm_outcome(ruling, check_result)
+
         narration_prompt = WORLD_BUILDING['CONTINUE_NARRATIVE'].format(**context)
         try:
-            narration = gpt_service.get_response(narration_prompt, temperature=1.0)
-            narration = (narration or '').strip()
+            turn_payload = gpt_service.get_structured(
+                narration_prompt, TurnResponseOut,
+                max_attempts=2, temperature=1.0,
+            )
         except Exception as e:
             return jsonify({'success': False, 'message': f'Narration failed: {e}'}), 502
+        if turn_payload is None:
+            return jsonify({'success': False,
+                            'message': 'Narration failed: invalid LLM payload.'}), 502
 
-        if narration:
-            transcript_service.add_entry(
+        narration = (turn_payload.narration or '').strip()
+        # DM ruling + dice entries come first so they precede the
+        # narration in the transcript order the frontend renders.
+        entries = list(dm_entries)
+
+        # 1) Newly introduced characters land first so dialogue lines that
+        # reference them resolve to the correct (just-created) Character row.
+        # ``name_service`` lets the dynamic-character path draw names from
+        # the seed's NameLibrary subset, mirroring world-build behavior so
+        # mid-game NPCs share the same naming aesthetic as their peers.
+        elevenlabs_api_key = _extract_elevenlabs_api_key()
+        current_dt = seed.current_date_time
+        name_service = NameService(db_session)
+        created_characters = []
+        # Track the LLM-supplied names alongside each persisted Character so
+        # dialogue lines that reference the original name still resolve to
+        # the (possibly renamed) row's canonical name.
+        for new_char in turn_payload.new_characters:
+            original_name = (getattr(new_char, 'name', '') or '').strip()
+            char = _create_dynamic_character(
+                db_session, seed_id, new_char,
+                elevenlabs_api_key=elevenlabs_api_key,
+                current_dt=current_dt,
+                name_service=name_service,
+            )
+            if char is not None:
+                created_characters.append((char, original_name))
+
+        # Build a lookup of every character name in this seed (including
+        # the MC and the ones created above) so dialogue speakers map to
+        # canonical names. The first-name alias catches the common LLM
+        # habit of calling characters by their given name only, which
+        # would otherwise leave the TTS layer unable to resolve a voice.
+        name_lookup = {}
+        for c in (
+            db_session.query(Character)
+            .filter(Character.seed_id == seed_id)
+            .all()
+        ):
+            full = (c.name or '').strip()
+            if not full:
+                continue
+            name_lookup[full.lower()] = full
+            first = full.split()[0].lower()
+            name_lookup.setdefault(first, full)
+
+        # When a dynamic character was renamed by the library override,
+        # alias the LLM-supplied name (and its first-name token) so the
+        # dialogue lines the LLM produced for the original name still map
+        # to the persisted character.
+        for char, original_name in created_characters:
+            if not original_name:
+                continue
+            if original_name.lower() == (char.name or '').lower():
+                continue
+            name_lookup.setdefault(original_name.lower(), char.name)
+            original_first = original_name.split()[0].lower() if original_name else ''
+            if original_first:
+                name_lookup.setdefault(original_first, char.name)
+
+        # 2) Narrator prose (if any). Each paragraph lands as its own entry
+        # so TTS playback can stream paragraph-by-paragraph instead of
+        # blocking on a single long synthesis call.
+        for paragraph in _split_paragraphs(narration):
+            narration_entry = transcript_service.add_entry(
                 session_factory, seed_id,
-                transcript_service.KIND_NARRATION, narration,
+                transcript_service.KIND_NARRATION, paragraph,
                 turn=turn, speaker='Narrator',
             )
+            if narration_entry is not None:
+                entries.append({
+                    'id': narration_entry.id,
+                    'kind': transcript_service.KIND_NARRATION,
+                    'speaker': 'Narrator',
+                    'text': paragraph,
+                })
+
+        # 3) Per-character dialogue lines, attributed individually so the
+        # frontend renders + voices each one as the speaking character.
+        for line in turn_payload.dialogue:
+            text = (line.text or '').strip()
+            if not text:
+                continue
+            speaker = _resolve_dialogue_speaker(
+                db_session, seed_id, line.speaker, name_lookup,
+            )
+            dialogue_entry = transcript_service.add_entry(
+                session_factory, seed_id,
+                transcript_service.KIND_DIALOGUE, text,
+                turn=turn, speaker=speaker or None,
+            )
+            if dialogue_entry is not None:
+                entries.append({
+                    'id': dialogue_entry.id,
+                    'kind': transcript_service.KIND_DIALOGUE,
+                    'speaker': speaker,
+                    'text': text,
+                })
 
         # Bump the turn counter only after a successful narration so failed
-        # turns can be retried without skipping ahead.
+        # turns can be retried without skipping ahead. The world clock
+        # advances by the DM's adjudicated cost (the DM is the source of
+        # truth for time); the narrator no longer estimates time itself.
+        # Falls back to the default per-turn pace if the DM's value is
+        # missing or non-positive so the clock keeps ticking either way.
         seed.current_turn = turn + 1
+        time_cost = int(getattr(ruling, 'time_cost_minutes', 0) or 0)
+        if time_cost <= 0:
+            time_cost = time_service.DEFAULT_TURN_MINUTES
+        time_service.advance_time(db_session, seed, time_cost)
         seed.updated_at = datetime.datetime.now()
         db_session.commit()
 
+        # Phase 5: now that the world clock has advanced, give the
+        # autonomous simulator a chance to draft fresh off-screen news.
+        # ``maybe_simulate`` is a no-op when not enough in-world time has
+        # elapsed, so a flurry of one-minute beats won't stack up calls.
+        # Failures are swallowed inside the service; any persisted news
+        # gets appended to the transcript entries the player sees this
+        # turn so the response carries the gossip with it.
+        try:
+            sim_context = _build_turn_context(db_session, seed_id) or context
+            sim_context['seed_data'] = seed_data
+            _, sim_entries = world_simulation.maybe_simulate(
+                db_session, seed_id, gpt_service,
+                context=sim_context, session_factory=session_factory,
+            )
+            if sim_entries:
+                entries.extend(sim_entries)
+        except Exception as e:
+            current_app.logger.warning(
+                "world_simulation tick failed on seed %s: %s", seed_id, e)
+
+        # If the narrator asked to hand off to a structured scenario, spin
+        # one up now so the response carries it back to the client. Failures
+        # here are non-fatal: the standard turn already landed, the player
+        # just gets the trigger as a hint to retry / pick differently.
+        scenario_view = None
+        trigger = getattr(turn_payload, 'scenario_trigger', None)
+        if trigger is not None:
+            handler = _scenarios.get_handler(trigger.kind)
+            if handler is not None:
+                try:
+                    started = handler.start(
+                        db_session, seed_id, trigger,
+                        current_turn=seed.current_turn,
+                        session_factory=session_factory,
+                    )
+                except Exception as e:
+                    db_session.rollback()
+                    started = None
+                    print(f"Scenario start failed for kind '{trigger.kind}': {e}")
+                if started is not None:
+                    scenario_view = _scenarios.scenario_view(db_session, started)
+
         # Refresh suggestions against the now-updated transcript so the next
         # batch reflects what just happened. Failure here is non-fatal.
-        refreshed_context = _build_turn_context(db_session, seed_id) or context
-        refreshed_context['seed_data'] = seed_data
-        suggestions = _generate_suggestions(gpt_service, refreshed_context)
+        # Skip suggestions while a scenario is active -- the player's next
+        # input must go through the scenario action endpoint, not a free
+        # action prompt.
+        suggestions = []
+        if scenario_view is None:
+            refreshed_context = _build_turn_context(db_session, seed_id) or context
+            refreshed_context['seed_data'] = seed_data
+            suggestions = _generate_suggestions(gpt_service, refreshed_context)
 
+        # ``narration`` / ``narration_id`` are kept for backwards compatibility
+        # with older frontends; new code should iterate ``entries`` instead.
+        narration_id = next(
+            (e['id'] for e in entries
+             if e['kind'] == transcript_service.KIND_NARRATION),
+            None,
+        )
         return jsonify({
             'success': True,
             'narration': narration,
+            'narration_id': narration_id,
+            'entries': entries,
+            'new_characters': [
+                {'id': c.id, 'name': c.name, 'race': c.race}
+                for c, _ in created_characters
+            ],
             'suggestions': suggestions,
             'turn': seed.current_turn,
+            'clock': time_service.serialize_clock(seed),
+            'scenario': scenario_view,
         }), 200
-    except Exception as e:
+    except Exception:
         db_session.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
+        current_app.logger.exception('submit_turn failed for seed_id=%s', seed_id)
+        return jsonify({'success': False, 'message': 'Turn failed; please retry.'}), 500
     finally:
         db_session.close()
+
+
+@main.route('/api/seed/<int:seed_id>/travel', methods=['POST'])
+@login_required
+@grok_api_key_required
+@limit("60 per minute")
+def submit_travel(seed_id):
+    """Move the main character to a reachable destination, advancing the clock.
+
+    Body: ``{"destination_id": <int>}``. The destination must appear in
+    ``travel_service.reachable_destinations`` for the MC's current
+    location -- arbitrary teleporting is rejected. The world clock is
+    bumped by the deterministic ``travel_minutes`` cost (no DM call,
+    no narration round-trip; this is the cheap, predictable path), and
+    a transcript line lands describing the trip so the next narration /
+    suggestion call has the move in its history.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        dest_id = int(data.get('destination_id'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False,
+                        'message': 'destination_id is required.'}), 400
+
+    Session = current_app.config['SESSION_FACTORY']
+    session_factory = Session
+    db_session = Session()
+    try:
+        seed = _seed_owned_by_caller(db_session, seed_id)
+        if not seed:
+            return jsonify({'success': False, 'message': 'Seed not found.'}), 404
+
+        # A scenario locks the free-text loop; travel goes through that
+        # gate too so the player can't walk away mid-battle / mid-trade.
+        active = _scenarios.active_scenario_for(db_session, seed_id)
+        if active is not None:
+            return jsonify({
+                'success': False,
+                'message': 'A scenario is in progress; resolve it first.',
+                'scenario': _scenarios.scenario_view(db_session, active),
+            }), 409
+
+        mc = (
+            db_session.query(Character)
+            .filter(Character.seed_id == seed_id,
+                    Character.main_character == True)  # noqa: E712
+            .first()
+        )
+        if mc is None:
+            return jsonify({'success': False,
+                            'message': 'No main character on this seed.'}), 409
+
+        from_loc = travel_service.resolve_current_location(
+            db_session, seed_id, mc)
+        if from_loc is None:
+            return jsonify({'success': False,
+                            'message': 'No starting location on this seed.'}), 409
+
+        destinations = travel_service.reachable_destinations(
+            db_session, seed_id, from_loc)
+        match = next((d for d in destinations if d['id'] == dest_id), None)
+        if match is None:
+            return jsonify({'success': False,
+                            'message': 'Destination is not reachable from here.'}), 409
+
+        to_loc = (db_session.query(Location)
+                  .filter(Location.id == dest_id).first())
+        if to_loc is None:
+            return jsonify({'success': False,
+                            'message': 'Destination not found.'}), 404
+
+        minutes = int(match['minutes'] or 0)
+        mc.current_location_id = to_loc.id
+        time_service.advance_time(db_session, seed, minutes)
+        seed.updated_at = datetime.datetime.now()
+
+        # Transcript line + structured meta so the prompt history reflects
+        # the move and the frontend can render a distinct "travel" pill.
+        line = (f"You travel from {from_loc.name} to {to_loc.name} "
+                f"(~{minutes} minutes).")
+        travel_entry = transcript_service.add_entry(
+            session_factory, seed_id,
+            transcript_service.KIND_NARRATION, line,
+            turn=seed.current_turn or 1, speaker='Narrator',
+            meta={
+                'kind': 'travel',
+                'from_id': from_loc.id, 'from_name': from_loc.name,
+                'to_id': to_loc.id, 'to_name': to_loc.name,
+                'minutes': minutes,
+            },
+        )
+        db_session.commit()
+
+        entries = []
+        if travel_entry is not None:
+            entries.append({
+                'id': travel_entry.id,
+                'kind': transcript_service.KIND_NARRATION,
+                'speaker': 'Narrator',
+                'text': line,
+            })
+
+        # Phase 5: travel typically advances the clock by hours, which is
+        # almost always enough to trigger an autonomous-events tick. We
+        # build the context AFTER the move so the simulator sees the new
+        # location as the MC's "starting_location" (and excludes it from
+        # off-screen candidates). Failures are non-fatal -- the trip
+        # already landed.
+        try:
+            sim_context = _build_turn_context(db_session, seed_id)
+            if sim_context is not None:
+                gpt_service = _make_gpt_service()
+                _, sim_entries = world_simulation.maybe_simulate(
+                    db_session, seed_id, gpt_service,
+                    context=sim_context, session_factory=session_factory,
+                )
+                if sim_entries:
+                    entries.extend(sim_entries)
+        except Exception as e:
+            current_app.logger.warning(
+                "world_simulation tick failed on travel for seed %s: %s",
+                seed_id, e)
+
+        # Refresh the destinations list for the new location so the UI
+        # can repopulate its travel panel without a second round-trip.
+        new_destinations = travel_service.reachable_destinations(
+            db_session, seed_id, to_loc)
+
+        return jsonify({
+            'success': True,
+            'minutes': minutes,
+            'clock': time_service.serialize_clock(seed),
+            'current_location': {
+                'id': to_loc.id, 'name': to_loc.name,
+                'type': to_loc.type, 'terrain': to_loc.terrain,
+                'parent_id': to_loc.parent_id,
+            },
+            'destinations': new_destinations,
+            'entries': entries,
+        }), 200
+    except Exception:
+        db_session.rollback()
+        current_app.logger.exception('submit_travel failed for seed_id=%s', seed_id)
+        return jsonify({'success': False, 'message': 'Travel failed; please retry.'}), 500
+    finally:
+        db_session.close()
+
+
+@main.route('/api/seed/<int:seed_id>/scenario', methods=['GET'])
+@login_required
+@grok_api_key_required
+@limit("60 per minute")
+def get_active_scenario(seed_id):
+    """Return the seed's currently-active scenario view, or ``null``.
+
+    The frontend hits this on resume to decide whether to mount the
+    scenario panel; it's also handy after a refresh to recover state
+    without re-fetching the whole world payload.
+    """
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+    try:
+        if _seed_owned_by_caller(db_session, seed_id) is None:
+            return jsonify({'scenario': None, 'error': 'Seed not found'}), 404
+        active = _scenarios.active_scenario_for(db_session, seed_id)
+        if active is None:
+            return jsonify({'scenario': None}), 200
+        return jsonify({
+            'scenario': _scenarios.scenario_view(db_session, active),
+        }), 200
+    except Exception:
+        current_app.logger.exception('get_active_scenario failed for seed_id=%s', seed_id)
+        return jsonify({'scenario': None}), 200
+    finally:
+        db_session.close()
+
+
+@main.route('/api/seed/<int:seed_id>/scenario/<int:scenario_id>/action',
+            methods=['POST'])
+@login_required
+@grok_api_key_required
+@limit("120 per minute")
+def submit_scenario_action(seed_id, scenario_id):
+    """Apply a structured action to an active scenario.
+
+    Routes the incoming JSON body to the kind-specific handler in
+    ``app/scenarios``; the handler is responsible for persisting state /
+    transcript writes and returning the refreshed view, any new transcript
+    entries to render, and a resolution flag.
+    """
+    payload = request.get_json(silent=True) or {}
+    Session = current_app.config['SESSION_FACTORY']
+    session_factory = Session
+    db_session = Session()
+    try:
+        if _seed_owned_by_caller(db_session, seed_id) is None:
+            return jsonify({'success': False,
+                            'message': 'Scenario not found.'}), 404
+        scenario = (
+            db_session.query(Scenario)
+            .filter(Scenario.id == scenario_id, Scenario.seed_id == seed_id)
+            .first()
+        )
+        if scenario is None:
+            return jsonify({'success': False,
+                            'message': 'Scenario not found.'}), 404
+        if scenario.status != 'active':
+            return jsonify({'success': False,
+                            'message': 'Scenario is no longer active.',
+                            'view': _scenarios.scenario_view(db_session, scenario),
+                            }), 409
+
+        handler = _scenarios.get_handler(scenario.kind)
+        if handler is None:
+            return jsonify({'success': False,
+                            'message': f"No handler for kind '{scenario.kind}'."
+                            }), 500
+
+        seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+        current_turn = seed.current_turn if seed else None
+
+        gpt_service = _make_gpt_service()
+        result, status = handler.apply_action(
+            db_session, scenario, payload,
+            gpt_service=gpt_service, session_factory=session_factory,
+            current_turn=current_turn,
+        )
+        if status >= 400:
+            return jsonify({'success': False, **result}), status
+        return jsonify({'success': True, **result}), 200
+    except Exception:
+        db_session.rollback()
+        current_app.logger.exception(
+            'submit_scenario_action failed for seed_id=%s scenario_id=%s',
+            seed_id, scenario_id)
+        return jsonify({'success': False, 'message': 'Scenario action failed; please retry.'}), 500
+    finally:
+        db_session.close()
+
+
+@main.route('/api/seed/<int:seed_id>/scenario/<int:scenario_id>/abort',
+            methods=['POST'])
+@login_required
+@grok_api_key_required
+@limit("30 per minute")
+def abort_scenario(seed_id, scenario_id):
+    """Force-close an active scenario with status='aborted'.
+
+    Used by the frontend's "Leave" / panel-dismiss control when the
+    scenario doesn't expose a graceful exit verb (or when the player wants
+    to bail out mid-flow). Persistent state changes already committed by
+    earlier actions are kept; only the active flag flips off.
+    """
+    Session = current_app.config['SESSION_FACTORY']
+    session_factory = Session
+    db_session = Session()
+    try:
+        if _seed_owned_by_caller(db_session, seed_id) is None:
+            return jsonify({'success': False,
+                            'message': 'Scenario not found.'}), 404
+        scenario = (
+            db_session.query(Scenario)
+            .filter(Scenario.id == scenario_id, Scenario.seed_id == seed_id)
+            .first()
+        )
+        if scenario is None:
+            return jsonify({'success': False,
+                            'message': 'Scenario not found.'}), 404
+        if scenario.status != 'active':
+            return jsonify({'success': True,
+                            'view': _scenarios.scenario_view(db_session, scenario),
+                            }), 200
+
+        seed = db_session.query(Seed).filter(Seed.id == seed_id).first()
+        current_turn = seed.current_turn if seed else None
+        summary = scenario.summary or f'{scenario.kind.capitalize()} aborted.'
+        from app.scenarios.base import resolve as _resolve
+        _resolve(db_session, scenario, 'aborted', summary,
+                 current_turn=current_turn)
+        db_session.commit()
+        transcript_service.add_entry(
+            session_factory, seed_id,
+            transcript_service.KIND_SYSTEM, summary,
+            turn=current_turn, speaker='Narrator',
+            meta={'scenario_kind': scenario.kind, 'verb': 'abort',
+                  'scenario_id': scenario.id},
+        )
+        return jsonify({'success': True,
+                        'view': _scenarios.scenario_view(db_session, scenario),
+                        }), 200
+    except Exception:
+        db_session.rollback()
+        current_app.logger.exception(
+            'abort_scenario failed for seed_id=%s scenario_id=%s',
+            seed_id, scenario_id)
+        return jsonify({'success': False, 'message': 'Failed to abort scenario.'}), 500
+    finally:
+        db_session.close()
+
 
 
 def _character_description(c, acquaintance_level='close'):
@@ -875,32 +2022,10 @@ def _build_stats(c):
     ]
 
 
-@main.route('/test-grok-key', methods=['POST'])
-@login_required
-@limit("30 per minute")
-def test_grok_key():
-    api_key = request.json['api_key']
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json'
-    }
-    body = {
-        "model": "grok-4-1-fast-non-reasoning",
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Hello!"}
-        ]
-    }
-    response = requests.post('https://api.x.ai/v1/chat/completions', json=body, headers=headers)
-    if response.ok:
-        return jsonify({'valid': True, 'message': 'API key is valid.'})
-    else:
-        return jsonify({'valid': False, 'message': 'API key is not valid.', 'error': response.json()}), 400
-
 @main.route('/auth/signup', methods=['POST'])
 @limit("5 per hour")
 def signup():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     username = data.get('username')
     email = data.get('email')
     password = data.get('password')
@@ -931,16 +2056,17 @@ def signup():
         session['username'] = new_user.username
 
         return jsonify({'success': True, 'message': 'Account created successfully', 'username': username}), 201
-    except Exception as e:
+    except Exception:
         db_session.rollback()
-        return jsonify({'success': False, 'message': f'Error creating account: {str(e)}'}), 500
+        current_app.logger.exception('signup failed')
+        return jsonify({'success': False, 'message': 'Could not create account.'}), 500
     finally:
         db_session.close()
 
 @main.route('/auth/login', methods=['POST'])
 @limit("20 per minute")
 def login():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     username = data.get('username')
     password = data.get('password')
     remember = bool(data.get('remember'))
@@ -965,8 +2091,9 @@ def login():
         session.permanent = remember
 
         return jsonify({'success': True, 'message': 'Login successful', 'username': username}), 200
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Error logging in: {str(e)}'}), 500
+    except Exception:
+        current_app.logger.exception('login failed')
+        return jsonify({'success': False, 'message': 'Login failed.'}), 500
     finally:
         db_session.close()
 
@@ -978,6 +2105,7 @@ def logout():
     user_id = session.get('user_id')
     if user_id is not None:
         _grok_key_store.clear(user_id)
+        _elevenlabs_key_store.clear(user_id)
     session.clear()
     return jsonify({'success': True, 'message': 'Logged out successfully'}), 200
 
@@ -993,6 +2121,11 @@ def grok_key_status():
     """
     user_id = session.get('user_id')
     present = bool(user_id is not None and _grok_key_store.has(user_id))
+    # In dev, a GROK_API_KEY pulled from .env satisfies the gate too, so
+    # report present so the frontend doesn't surface the API-key-required
+    # modal. Production sets DEV_GROK_API_KEY to None so this is a no-op.
+    if not present and current_app.config.get('DEV_GROK_API_KEY'):
+        present = True
     return jsonify({'present': present}), 200
 
 
@@ -1033,6 +2166,138 @@ def grok_key_clear():
         _grok_key_store.clear(user_id)
     return jsonify({'success': True, 'present': False}), 200
 
+
+# --- ElevenLabs key + TTS ---------------------------------------------------
+# Same transport pattern as the Grok key: the value lives in an encrypted
+# server-side store keyed by user_id and is never echoed back to the browser.
+# TTS is opt-in, so these routes are not gated by ``grok_api_key_required``.
+def _is_valid_elevenlabs_key(key):
+    return bool(key) and len(key) >= 16
+
+
+@main.route('/api/elevenlabs-key', methods=['GET'])
+@login_required
+def elevenlabs_key_status():
+    user_id = session.get('user_id')
+    present = bool(user_id is not None and _elevenlabs_key_store.has(user_id))
+    if not present and current_app.config.get('DEV_ELEVENLABS_API_KEY'):
+        present = True
+    return jsonify({'present': present}), 200
+
+
+@main.route('/api/elevenlabs-key', methods=['POST'])
+@login_required
+@limit("20 per hour")
+def elevenlabs_key_set():
+    data = request.get_json(silent=True) or {}
+    api_key = (data.get('api_key') or '').strip()
+    if not _is_valid_elevenlabs_key(api_key):
+        return jsonify({
+            'success': False,
+            'message': 'A valid ElevenLabs API key is required.'
+        }), 400
+    user_id = session.get('user_id')
+    if user_id is None:
+        return jsonify({'success': False, 'message': 'Authentication required.'}), 401
+    _elevenlabs_key_store.set(user_id, api_key)
+    return jsonify({'success': True, 'present': True}), 200
+
+
+@main.route('/api/elevenlabs-key', methods=['DELETE'])
+@login_required
+def elevenlabs_key_clear():
+    user_id = session.get('user_id')
+    if user_id is not None:
+        _elevenlabs_key_store.clear(user_id)
+    return jsonify({'success': True, 'present': False}), 200
+
+
+def _tts_cache_dir():
+    base = os.path.join(current_app.instance_path, 'tts_cache')
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    return base
+
+
+def _resolve_voice_id_for_speaker(db_session, seed_id, speaker):
+    """Map a transcript entry's speaker to a Character.voice_id.
+
+    Falls back to the narrator voice when the speaker is the narrator,
+    unknown, or the matching Character has no voice_id assigned (e.g.
+    the world was built before an ElevenLabs key was bound). Matching
+    is case-insensitive and falls back to the first name so dialogue
+    written as just "Lyra" still resolves to "Lyra Aldun".
+    """
+    if not speaker or speaker.strip().lower() in {'narrator', 'you', 'system'}:
+        return elevenlabs_service.NARRATOR_VOICE_ID
+    cleaned = speaker.strip()
+    char = (
+        db_session.query(Character)
+        .filter(Character.seed_id == seed_id,
+                func.lower(Character.name) == cleaned.lower())
+        .first()
+    )
+    if char is None:
+        first = cleaned.split()[0].lower()
+        char = (
+            db_session.query(Character)
+            .filter(Character.seed_id == seed_id,
+                    func.lower(Character.name).like(f'{first} %'))
+            .first()
+        )
+    if char and char.voice_id:
+        return char.voice_id
+    return elevenlabs_service.NARRATOR_VOICE_ID
+
+
+@main.route('/api/tts/<int:seed_id>/<int:entry_id>', methods=['GET'])
+@login_required
+@limit("120 per hour")
+def tts_for_entry(seed_id, entry_id):
+    """Return mp3 audio for a single transcript entry.
+
+    Resolves the speaker on the entry to a Character voice id (or the
+    narrator default), then delegates to the ElevenLabs service which
+    transparently caches results on disk so repeat requests for the same
+    line don't bill the user's quota a second time. Returns 404 when the
+    entry doesn't belong to the seed and 503 when no audio could be
+    produced (no key + cold cache, or upstream failure).
+    """
+    Session = current_app.config['SESSION_FACTORY']
+    db_session = Session()
+    try:
+        if _seed_owned_by_caller(db_session, seed_id) is None:
+            return jsonify({'success': False, 'message': 'Entry not found.'}), 404
+        entry = (
+            db_session.query(TranscriptEntry)
+            .filter(TranscriptEntry.id == entry_id,
+                    TranscriptEntry.seed_id == seed_id)
+            .first()
+        )
+        if not entry or not entry.text:
+            return jsonify({'success': False, 'message': 'Entry not found.'}), 404
+
+        voice_id = _resolve_voice_id_for_speaker(db_session, seed_id, entry.speaker)
+        api_key = _extract_elevenlabs_api_key()
+        audio = elevenlabs_service.synthesize(
+            api_key, voice_id, entry.text, cache_dir=_tts_cache_dir(),
+        )
+        if not audio:
+            return jsonify({
+                'success': False,
+                'message': 'TTS unavailable (missing key or upstream error).'
+            }), 503
+        resp = Response(audio, mimetype='audio/mpeg')
+        # Browser-side cache: entry text + voice are immutable so the
+        # client can safely keep the rendering for the session lifetime.
+        resp.headers['Cache-Control'] = 'private, max-age=86400'
+        return resp
+    finally:
+        db_session.close()
+
+
 @main.route('/auth/check', methods=['GET'])
 def check_auth():
     if 'user_id' in session:
@@ -1046,7 +2311,7 @@ def check_auth():
 def analyze_stereotype():
     """Analyze an uploaded image and generate a stereotypical character build using Grok Vision API"""
     try:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         image_data = data.get('image_data')
         # Header-only transport: the @grok_api_key_required decorator already
         # rejected the request if the header is missing or malformed, so by
@@ -1132,12 +2397,13 @@ def analyze_stereotype():
                 'raw_response': content
             }), 200
 
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
+            current_app.logger.exception('analyze_stereotype JSON parse failed')
             return jsonify({
                 'success': False,
-                'message': f'Failed to parse JSON: {str(e)}',
-                'raw_response': content
+                'message': 'Failed to parse model response.'
             }), 500
 
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
+    except Exception:
+        current_app.logger.exception('analyze_stereotype failed')
+        return jsonify({'success': False, 'message': 'Server error.'}), 500

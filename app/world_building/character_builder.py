@@ -1,6 +1,7 @@
 # character_builder.py
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+import json
 import random
 import traceback
 
@@ -9,8 +10,9 @@ from app.orm import (
     Event, EventCharacter, CharacterRelationship, Item, CharacterItem, Seed,
 )
 from app.prompt_templates import WORLD_BUILDING
+from app.services import elevenlabs_service
 from app.world_building.schemas import (
-    MainCharacterOut, MainCharacterItemsOut, NPCListOut, RelationshipOut,
+    EventOut, MainCharacterOut, MainCharacterItemsOut, NPCListOut, RelationshipOut,
 )
 
 
@@ -19,13 +21,39 @@ class CharacterBuilder:
     _MAX_WORKERS = 8
 
     def __init__(self, seed_data, seed_id, session, gpt_service,
-                 progress_callback=None, name_service=None):
+                 progress_callback=None, name_service=None,
+                 elevenlabs_api_key=None):
         self.seed_data = seed_data
         self.seed_id = seed_id
         self.session = session
         self.gpt_service = gpt_service
         self.name_service = name_service
+        # Optional: when present, characters get an ElevenLabs voice_id
+        # assigned via voice search at creation time. Missing/invalid keys
+        # are tolerated -- voice_id simply stays NULL and the TTS layer
+        # falls back to the narrator voice at playback time.
+        self.elevenlabs_api_key = elevenlabs_api_key
         self.progress_callback = progress_callback or (lambda msg, status='info': None)
+
+    def _pick_voice_id(self, *, gender, date_of_birth, race, search_text=None):
+        """Resolve a voice id for a character, or None if EL is unavailable."""
+        if not self.elevenlabs_api_key:
+            return None
+        current_dt = None
+        if hasattr(self, 'character_data'):
+            current_dt = self.character_data.get('current_date_time')
+        try:
+            return elevenlabs_service.find_voice_for_character(
+                self.elevenlabs_api_key,
+                gender=gender,
+                date_of_birth=date_of_birth,
+                current_dt=current_dt,
+                race=race,
+                search_text=search_text,
+            )
+        except Exception as e:
+            print(f'Voice search failed: {e}')
+            return None
 
     def _seeded_name_or_none(self, gender, category='first'):
         """Pull a name from NameLibrary using the seed's persisted themes."""
@@ -37,15 +65,30 @@ class CharacterBuilder:
         return self.name_service.random_name(themes, gender=gender, category=category)
 
     @staticmethod
-    def _seed_data_has_name(seed_data):
-        """Detect a user-provided main-character name on the incoming seed."""
+    def _seed_data_name(seed_data):
+        """Return the user-provided main-character name, or None.
+
+        ``seed_data`` arrives as a dict from in-process callers and as a JSON
+        string from the HTTP layer (the frontend ``JSON.stringify``s the form
+        payload before posting), so accept both shapes.
+        """
+        if isinstance(seed_data, str):
+            try:
+                seed_data = json.loads(seed_data)
+            except (ValueError, TypeError):
+                return None
         if not isinstance(seed_data, dict):
-            return False
+            return None
         for key in ('character_name', 'name', 'main_character_name'):
             v = seed_data.get(key)
             if isinstance(v, str) and v.strip():
-                return True
-        return False
+                return v.strip()
+        return None
+
+    @classmethod
+    def _seed_data_has_name(cls, seed_data):
+        """Detect a user-provided main-character name on the incoming seed."""
+        return cls._seed_data_name(seed_data) is not None
 
     def create_main_character(self):
         """Single batched call: core stats + skills + statuses in one LLM round-trip."""
@@ -65,13 +108,22 @@ class CharacterBuilder:
             stats = {s: random.randint(8, 16) for s in
                      ('strength', 'speed', 'agility', 'intelligence', 'wisdom', 'charisma')}
 
-            # Override the LLM name with one drawn from the seed's chosen
-            # naming themes UNLESS the user explicitly supplied a name.
-            name = payload.name
-            if not self._seed_data_has_name(self.seed_data):
+            # Prefer the user-supplied name; otherwise override the LLM name
+            # with one drawn from the seed's chosen naming themes.
+            user_name = self._seed_data_name(self.seed_data)
+            if user_name:
+                name = user_name
+            else:
+                name = payload.name
                 seeded = self._seeded_name_or_none(payload.gender, category='first')
                 if seeded:
                     name = seeded
+
+            voice_id = self._pick_voice_id(
+                gender=payload.gender,
+                date_of_birth=payload.date_of_birth,
+                race=payload.race,
+            )
 
             new_character = Character(
                 seed_id=self.seed_id,
@@ -88,6 +140,7 @@ class CharacterBuilder:
                 current_health=100,
                 max_health=100,
                 current_currency=0,
+                voice_id=voice_id,
                 **stats,
             )
             self.session.add(new_character)
@@ -236,18 +289,28 @@ class CharacterBuilder:
                     print(f"NPC fetch failed for location {loc.get('name')}: {e}")
                     npcs_per_location[loc['id']] = []
 
+        # Flatten the per-location buckets so the voice-search pass can run
+        # one future per NPC across the whole world. Persistence is done on
+        # this thread (SQLAlchemy session is not safe to share), but voice
+        # search is pure HTTP and parallelises freely.
+        flat_npcs = [
+            (loc, npc)
+            for loc in self.locations
+            for npc in npcs_per_location.get(loc['id'], [])
+        ]
+        voice_ids = self._batch_resolve_npc_voices([npc for _, npc in flat_npcs])
+
         all_npcs_data = []
-        for location in self.locations:
-            for npc in npcs_per_location.get(location['id'], []):
-                try:
-                    persisted = self._persist_npc(npc, location)
-                    if persisted is not None:
-                        all_npcs_data.append(persisted)
-                except Exception as e:
-                    self.session.rollback()
-                    print(f"Failed to persist NPC '{getattr(npc, 'name', '?')}' "
-                          f"in {location.get('name')}: {e}")
-                    continue
+        for idx, (location, npc) in enumerate(flat_npcs):
+            try:
+                persisted = self._persist_npc(npc, location, voice_id=voice_ids[idx])
+                if persisted is not None:
+                    all_npcs_data.append(persisted)
+            except Exception as e:
+                self.session.rollback()
+                print(f"Failed to persist NPC '{getattr(npc, 'name', '?')}' "
+                      f"in {location.get('name')}: {e}")
+                continue
 
         self.NPCs_data = all_npcs_data
         print(f"Surrounding characters created: {len(all_npcs_data)} NPCs")
@@ -263,7 +326,41 @@ class CharacterBuilder:
         )
         return list(payload.npcs) if payload else []
 
-    def _persist_npc(self, npc, location):
+    def _batch_resolve_npc_voices(self, npcs):
+        """Run all NPC voice searches concurrently and return them in order.
+
+        Returns a list of voice ids (or ``None``) the same length as
+        ``npcs``. When no ElevenLabs key is configured the list is filled
+        with ``None`` without spawning any workers.
+        """
+        n = len(npcs)
+        if n == 0:
+            return []
+        if not self.elevenlabs_api_key:
+            return [None] * n
+
+        results = [None] * n
+
+        def _resolve(idx, npc):
+            event_hint = getattr(getattr(npc, 'event', None), 'description', None)
+            return idx, self._pick_voice_id(
+                gender=npc.gender,
+                date_of_birth=npc.date_of_birth,
+                race=npc.race,
+                search_text=event_hint,
+            )
+
+        with ThreadPoolExecutor(max_workers=self._MAX_WORKERS) as pool:
+            futures = [pool.submit(_resolve, i, npc) for i, npc in enumerate(npcs)]
+            for future in as_completed(futures):
+                try:
+                    idx, vid = future.result()
+                    results[idx] = vid
+                except Exception as e:
+                    print(f'NPC voice search failed: {e}')
+        return results
+
+    def _persist_npc(self, npc, location, voice_id=None):
         level = random.randint(1, 3)
 
         # Override the LLM-generated NPC name with one drawn from the seed's
@@ -293,6 +390,7 @@ class CharacterBuilder:
             current_health=100 * level,
             max_health=100 * level,
             current_currency=random.randint(0, 1000),
+            voice_id=voice_id,
         )
         self.session.add(new_character)
         self.session.flush()
@@ -534,4 +632,92 @@ class CharacterBuilder:
             chosen.append(random.choice(other_indices))
 
         return chosen
+
+    # ------------------------------------------------------------------ #
+    # Opening event (MC-anchored)                                         #
+    # ------------------------------------------------------------------ #
+    def create_opening_event(self):
+        """Generate one opening event involving the MC at the starting location.
+
+        Persists an Event row plus an EventCharacter linking the protagonist
+        so the MC-centric info-panel filters surface at least one event (and
+        its location) from world-build time. Failures here are non-fatal:
+        the world is already fully persisted; the opening event is a UX
+        sweetener on top.
+        """
+        mc_payload = getattr(self, 'character_data', None) or {}
+        mc_id = mc_payload.get('id')
+        if not mc_id:
+            return {"message": "Main character not created; skipping opening event.",
+                    "status": "skipped"}
+
+        locations = list(getattr(self, 'locations', []) or [])
+        if not locations:
+            return {"message": "No locations available; skipping opening event.",
+                    "status": "skipped"}
+        starting_location = locations[0]
+
+        payload = self.gpt_service.get_structured(
+            WORLD_BUILDING['OPENING_EVENT'].format(
+                seed_data=self.seed_data,
+                character=mc_payload,
+                starting_location=starting_location,
+            ),
+            EventOut,
+            max_attempts=2,
+            temperature=0.9,
+        )
+        if payload is None:
+            return {"message": "Failed to generate opening event.",
+                    "status": "failure"}
+
+        try:
+            current_dt = mc_payload.get('current_date_time')
+            new_event = Event(
+                seed_id=self.seed_id,
+                name=payload.name,
+                description=payload.description,
+                start_date_time=current_dt - timedelta(hours=random.randint(1, 5)) if current_dt else None,
+                end_date_time=current_dt,
+                type=payload.type,
+                location_id=starting_location['id'],
+                start_turn=1,
+                end_turn=1,
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+            self.session.add(new_event)
+            self.session.flush()
+
+            self.session.add(EventCharacter(
+                seed_id=self.seed_id,
+                character_id=mc_id,
+                event_id=new_event.id,
+                role=payload.role,
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            ))
+            self.session.commit()
+        except Exception as e:
+            self.session.rollback()
+            traceback.print_exc()
+            return {"message": f"Failed to persist opening event. {e}",
+                    "status": "failure"}
+
+        # Expose the persisted event so the intro narrator can anchor the
+        # opening prose to it; otherwise the narration drifts and the player
+        # sees a calm scene while the events panel shows a crisis.
+        self.opening_event = {
+            'id': new_event.id,
+            'name': payload.name,
+            'description': payload.description,
+            'type': payload.type,
+            'role': payload.role,
+            'location_id': starting_location['id'],
+            'location_name': starting_location.get('name'),
+        }
+
+        return {"message": "Opening event created successfully",
+                "status": "success",
+                "event_id": new_event.id}
 

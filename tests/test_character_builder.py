@@ -1,10 +1,10 @@
 import pytest
 from unittest.mock import MagicMock
 
-from app.orm import Character, NameLibrary
+from app.orm import Character, Event, EventCharacter, NameLibrary
 from app.services.name_service import NameService
 from app.world_building.character_builder import CharacterBuilder
-from app.world_building.schemas import MainCharacterOut
+from app.world_building.schemas import EventOut, MainCharacterOut
 
 
 @pytest.fixture
@@ -62,6 +62,10 @@ def test_create_surrounding_characters_no_locations(seed_data, db_session, seed_
     ({}, False),
     (None, False),
     ("not a dict", False),
+    # The frontend posts seed_data as a JSON string; accept that shape too.
+    ('{"character_name": "Lyra"}', True),
+    ('{"theme": "fantasy"}', False),
+    ('{"character_name": "   "}', False),
 ])
 def test_seed_data_has_name(seed, expected):
     assert CharacterBuilder._seed_data_has_name(seed) is expected
@@ -128,10 +132,28 @@ def test_create_main_character_respects_user_provided_name(elf_library, seed_in_
     result = builder.create_main_character()
 
     assert result["status"] == "success"
-    # The user-supplied name is on the seed_data, but create_main_character
-    # itself only short-circuits the library override; the LLM-generated
-    # name is what flows into the row.
-    assert builder.character_data['name'] == 'LLM_Name'
+    assert builder.character_data['name'] == 'Hero'
+    persisted = elf_library.query(Character).filter_by(
+        id=builder.character_data['id']).one()
+    assert persisted.name == 'Hero'
+
+
+def test_create_main_character_respects_user_name_from_json_string(
+        elf_library, seed_in_db):
+    # Mirrors the production HTTP path: the frontend JSON.stringifies the
+    # form payload, so seed_data lands here as a string rather than a dict.
+    name_service = _name_service_with_themes(
+        elf_library, seed_in_db.id,
+        [{'source': 'fantasynames', 'theme': 'elf'}])
+    gpt = _stub_gpt_returning(_make_main_payload(name="LLM_Name", gender=True))
+
+    seed_data = '{"character_name": "Hero", "character_age": "30", "character_gender": "male"}'
+    builder = CharacterBuilder(seed_data, seed_in_db.id,
+                               elf_library, gpt, name_service=name_service)
+    result = builder.create_main_character()
+
+    assert result["status"] == "success"
+    assert builder.character_data['name'] == 'Hero'
 
 
 def test_create_main_character_keeps_llm_name_when_no_name_service(
@@ -173,3 +195,72 @@ def test_create_main_character_keeps_llm_name_when_library_has_no_match(
 
     assert result["status"] == "success"
     assert builder.character_data['name'] == 'LLM_Name'
+
+
+# --------------------------------------------------------------------- #
+# create_opening_event                                                   #
+# --------------------------------------------------------------------- #
+def test_create_opening_event_persists_event_and_mc_link(seed_data, db_session, seed_in_db):
+    # Persist a Character row so character_data['id'] points at a real MC.
+    mc = Character(seed_id=seed_in_db.id, main_character=True, alive=True,
+                   name='Hero', race='Human', gender=True, level=1)
+    db_session.add(mc)
+    db_session.commit()
+
+    gpt = _stub_gpt_returning(EventOut(
+        name='Tavern Brawl', description='Fists fly over a spilled drink.',
+        type='conflict', role='participant',
+    ))
+    builder = CharacterBuilder(seed_data, seed_in_db.id, db_session, gpt)
+    builder.character_data = {'id': mc.id, 'name': 'Hero',
+                              'current_date_time': None}
+    builder.locations = [{'id': 1, 'name': 'Hamlet'}]
+
+    # The starting location row has to exist for the FK on Event to resolve.
+    from app.orm import Location
+    db_session.add(Location(id=1, seed_id=seed_in_db.id, name='Hamlet',
+                            type='village'))
+    db_session.commit()
+
+    result = builder.create_opening_event()
+
+    assert result['status'] == 'success'
+    event = db_session.query(Event).filter_by(id=result['event_id']).one()
+    assert event.name == 'Tavern Brawl'
+    assert event.location_id == 1
+    link = db_session.query(EventCharacter).filter_by(event_id=event.id).one()
+    assert link.character_id == mc.id
+    assert link.role == 'participant'
+    # The persisted event payload is exposed so the intro narrator can
+    # anchor the opening prose to it instead of drifting into a contradictory
+    # calm scene while the events panel shows the same crisis.
+    assert builder.opening_event['name'] == 'Tavern Brawl'
+    assert builder.opening_event['role'] == 'participant'
+    assert builder.opening_event['location_id'] == 1
+
+
+def test_create_opening_event_skips_without_main_character(seed_data, db_session, seed_in_db):
+    builder = CharacterBuilder(seed_data, seed_in_db.id, db_session, MagicMock())
+    builder.locations = [{'id': 1, 'name': 'Hamlet'}]
+
+    result = builder.create_opening_event()
+    assert result['status'] == 'skipped'
+
+
+def test_create_opening_event_skips_without_locations(seed_data, db_session, seed_in_db):
+    builder = CharacterBuilder(seed_data, seed_in_db.id, db_session, MagicMock())
+    builder.character_data = {'id': 99, 'name': 'Hero'}
+    builder.locations = []
+
+    result = builder.create_opening_event()
+    assert result['status'] == 'skipped'
+
+
+def test_create_opening_event_returns_failure_on_llm_none(seed_data, db_session, seed_in_db):
+    gpt = _stub_gpt_returning(None)
+    builder = CharacterBuilder(seed_data, seed_in_db.id, db_session, gpt)
+    builder.character_data = {'id': 99, 'name': 'Hero'}
+    builder.locations = [{'id': 1, 'name': 'Hamlet'}]
+
+    result = builder.create_opening_event()
+    assert result['status'] == 'failure'

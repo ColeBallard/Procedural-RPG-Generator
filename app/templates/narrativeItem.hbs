@@ -1,1 +1,1 @@
-<li class="nav-item narrative-{{kind}}">{{#if speaker}}<strong class="narrative-speaker">{{speaker}}:</strong> {{/if}}{{text}}</li>
+<li class="nav-item narrative-{{kind}}" {{#if id}}data-entry-id="{{id}}"{{/if}}>{{#if id}}<button type="button" class="narrative-tts-btn" title="Play narration" aria-label="Play narration">🔊</button>{{/if}}{{#if speaker}}<strong class="narrative-speaker">{{speaker}}:</strong> {{/if}}{{text}}</li>

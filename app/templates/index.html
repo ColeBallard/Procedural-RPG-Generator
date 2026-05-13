@@ -19,6 +19,11 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
         integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
 
+    <!-- Leaflet CSS (used by the Info-panel world map; custom CRS, no tiles) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="" />
+
     <!-- Custom CSS -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
 
@@ -34,10 +39,11 @@
         integrity="sha384-0pUGZvbkm6XF6gxjEnlmuGrJXVbNuzT9qBBavbLwCsOGabYfZo0T0to5eqruptLy"
         crossorigin="anonymous"></script>
 
-    <!-- Handlebars -->
-    <script src="https://cdn.jsdelivr.net/npm/handlebars@4.7.8/dist/handlebars.min.js"
-        integrity="sha384-/7IOPDPk7kcWe970wNJpeApuC/EzCQwonLz5G/s//R5Jji9QWBcbfASHI0G1nh2p"
-        crossorigin="anonymous"></script>
+    <!-- Leaflet JS (loaded as a non-module so it attaches to window.L
+         before main.js's worldMap module looks it up) -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
 
     <!-- Custom JS -->
     <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
@@ -144,6 +150,19 @@
                 <div class="col-md-3">
                     <div class="border border-white rounded scrollable-section">
                     <h3 class="title">Info</h3>
+                    <!-- World map: rendered by app/static/js/ui/worldMap.js
+                         using Leaflet with L.CRS.Simple. Top-level
+                         settlements are shown as markers; clicking one
+                         drills into its sub-locations. -->
+                    <div id="worldMapPanel" class="world-map-panel" style="display: none;">
+                        <div class="world-map-header">
+                            <button type="button" id="worldMapBackBtn"
+                                    class="world-map-back-btn" style="display: none;"
+                                    aria-label="Back to world view">← Region</button>
+                            <span id="worldMapTitle" class="world-map-title">Region</span>
+                        </div>
+                        <div id="worldMap" class="world-map"></div>
+                    </div>
                     <div class="accordion accordion-flush" id="infoAccordion">
                         <!-- Locations Dropdown -->
                         <div class="accordion-item">
@@ -179,13 +198,13 @@
                                 </div>
                             </div>
                         </div>
-                        <!-- Interacting Characters Dropdown -->
+                        <!-- Characters Dropdown (only NPCs the MC has met) -->
                         <div class="accordion-item">
                             <h2 class="accordion-header" id="headingCharacters">
                                 <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
                                     data-bs-target="#flush-collapseCharacters" aria-expanded="false"
                                     aria-controls="flush-collapseCharacters">
-                                    Interacting Characters
+                                    Characters
                                 </button>
                             </h2>
                             <div id="flush-collapseCharacters" class="accordion-collapse collapse"
@@ -219,25 +238,78 @@
 
                 <!-- Middle Column: Main Game Area -->
                 <div class="col-md-5">
-                    <div class="scrollable-section">
-                    <h3 class="title">Narrative</h3>
-                    <div id="game-output">
-                        <!-- Narrative content goes here -->
-                        <ul class="nav flex-column" id="narrativeList"></ul>
+                    <div class="scrollable-section narrative-section">
+                    <h3 class="title narrative-title">
+                        <span>Narrative</span>
+                        <!-- World clock + time-of-day badge. Updated by
+                             renderClock() from /api/world and the per-turn
+                             response so the player always knows where they
+                             stand in the world's day/night cycle. -->
+                        <span id="world-clock" class="world-clock" title="In-world time" hidden>
+                            <span class="world-clock-icon" aria-hidden="true">🕰️</span>
+                            <span class="world-clock-display"></span>
+                            <span class="world-clock-tod"></span>
+                        </span>
+                        <label class="tts-toggle" title="Narrate transcript with text-to-speech">
+                            <input type="checkbox" id="tts-toggle" />
+                            <span class="tts-toggle-slider"></span>
+                            <span class="tts-toggle-label">🔊 TTS</span>
+                        </label>
+                    </h3>
+                    <div class="game-output-wrapper">
+                        <div id="game-output">
+                            <!-- Narrative content goes here -->
+                            <ul class="nav flex-column" id="narrativeList"></ul>
+                        </div>
+                        <button type="button" id="scroll-to-bottom-btn"
+                            class="scroll-to-bottom-btn" aria-label="Scroll to latest"
+                            title="Scroll to latest" hidden>
+                            <span aria-hidden="true">↓</span>
+                        </button>
                     </div>
                     <div id="user-options">
+                        <!-- Travel panel: lists destinations reachable from
+                             the MC's current location with their pre-computed
+                             time costs. Renderer in main.js (renderTravelPanel)
+                             populates it from /api/world and the /travel
+                             response; hidden when no destinations are known
+                             (world-build phase, or an MC that hasn't been
+                             placed yet). -->
+                        <div id="travel-section" class="travel-section" hidden>
+                            <button type="button" id="travel-label"
+                                class="suggestions-label" aria-expanded="true"
+                                aria-controls="travel-destinations">
+                                <span class="suggestions-toggle-icon" aria-hidden="true">▾</span>
+                                <span>Travel from <span id="travel-current-name">…</span></span>
+                            </button>
+                            <ul class="nav" id="travel-destinations"></ul>
+                        </div>
                         <!-- Suggested actions for the current situation. The
-                             label hides itself when there are no suggestions. -->
-                        <div id="suggestions-label" class="suggestions-label" style="display: none;">Suggested actions</div>
-                        <ul class="nav flex-column" id="optionsList"></ul>
+                             label doubles as a toggle: clicking it collapses
+                             the list while leaving the input usable. The
+                             whole section hides itself when there are no
+                             suggestions to show. -->
+                        <div id="suggestions-section">
+                            <button type="button" id="suggestions-label" class="suggestions-label" style="display: none;"
+                                aria-expanded="true" aria-controls="optionsList">
+                                <span class="suggestions-toggle-icon" aria-hidden="true">▾</span>
+                                <span id="suggestions-label-text">Suggested actions</span>
+                            </button>
+                            <ul class="nav" id="optionsList"></ul>
+                        </div>
                         <textarea id="game-input" name="game-input" class="form-control"
                             placeholder="Or go your own way... (Ctrl+Enter to submit)"></textarea>
                         <button type="button" class="btn btn-primary" id="submit-game-input-btn">Submit</button>
                     </div>
                     <div class="error" id="game-error"></div>
 
-                    <!-- Optional Battle UI -->
-                    <div id="battle-ui" class="hidden"></div>
+                    <!-- Structured scenario panel (battle / dialogue / trade).
+                         Mounted by scenarioController.js when /api/world or
+                         /api/seed/<id>/turn returns an active scenario; the
+                         free-form #user-options panel is hidden while it
+                         lives so the player drives the scenario through its
+                         own action vocabulary instead of free-text input. -->
+                    <div id="scenario-ui" class="scenario-ui hidden"></div>
                     </div>
                 </div>
 
@@ -268,6 +340,25 @@
                             </div>
                         </div>
                     </div>
+                    </div>
+                </div>
+            </div>
+            <!-- Dice roll overlay. ``flashDiceOverlay()`` in main.js
+                 toggles ``visible`` for ~1.2s whenever a transcript
+                 entry of kind 'dice' lands; the displayed result is
+                 the meta payload from dice_service so the player sees
+                 the d20 face the substrate actually rolled. Pointer
+                 events stay disabled so the overlay never traps
+                 clicks meant for the underlying transcript. -->
+            <div id="dice-roll-overlay" class="dice-roll-overlay" aria-hidden="true">
+                <div class="dice-roll-card">
+                    <div class="dice-roll-d20" data-dice-face="?">
+                        <span class="dice-roll-face">?</span>
+                    </div>
+                    <div class="dice-roll-meta">
+                        <div class="dice-roll-label">Skill Check</div>
+                        <div class="dice-roll-detail"></div>
+                        <div class="dice-roll-verdict"></div>
                     </div>
                 </div>
             </div>
@@ -415,16 +506,6 @@
                     </div>
                 </div>
 
-                <!-- Emotional Attributes Settings -->
-                <div class="settings-section">
-                    <h4 class="settings-section-title">💭 Emotional Attributes</h4>
-                    <p class="settings-description">Manage the emotional attribute scales used for character relationships.</p>
-
-                    <div id="emotional-attributes-container">
-                        <!-- Will be populated dynamically -->
-                    </div>
-                </div>
-
                 <!-- Back Button -->
                 <button type="button" class="other-button" id="settings-back-btn">⬅️ Back to Menu</button>
                 <div id="settings-message" class="settings-message" style="display: none;"></div>
@@ -439,6 +520,17 @@
                 <button type="button" class="other-button" id="save-api-keys-btn">💾 Save Key</button>
                 <button type="button" class="other-button" id="clear-api-key-btn" disabled>🗑️ Clear Key</button>
                 <div id="api-keys-message" style="display: none;"></div>
+
+                <div class="input" style="margin-top: 1rem;">
+                    <label class="input-label" for="elevenlabs-api-key-input">🔊 ElevenLabs API Key (optional)</label>
+                    <input class="form-control" type="password" id="elevenlabs-api-key-input"
+                        name="elevenlabs-api-key-input" placeholder="Optional. Enables text-to-speech narration.">
+                </div>
+                <div id="elevenlabs-api-key-status" class="grok-key-status-missing">⚠️ No key configured</div>
+                <button type="button" class="other-button" id="save-elevenlabs-key-btn">💾 Save Key</button>
+                <button type="button" class="other-button" id="clear-elevenlabs-key-btn" disabled>🗑️ Clear Key</button>
+                <div id="elevenlabs-keys-message" style="display: none;"></div>
+
                 <div id="api-keys-note">
                     <strong>🔒 Privacy Notice:</strong> Your Grok API key is sent to this application's
                     server once (over HTTPS) when you click <em>Save Key</em>. The server holds it
